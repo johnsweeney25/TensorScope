@@ -166,12 +166,10 @@ The framework includes three main modules:
 - Multi-task conflict analysis using gradient alignment
 - Critical sample identification via TracIn
 
-### 3. Metrics Collection (`training_metrics.py`)*
+### 3. Metrics Collection (`BombshellMetrics.py`)
 - Comprehensive suite of training diagnostics
 - Memory-efficient implementations for large-scale analysis
 - Unified interface for diverse metrics
-
-*Currently named BombshellMetrics.py - should be renamed
 
 ### Implementation Transparency: Reimplementations vs. Extensions
 
@@ -214,13 +212,11 @@ These capabilities enable causal analysis and model surgery that isn't available
 
 | Capability | What It Enables | Implementation | Location | Not Available In |
 |------------|----------------|----------------|----------|------------------|
-| **Selective Head Ablation** | Disable specific attention heads for causal analysis | `freeze_attention_heads()` with zero/soft/identity modes | experimental_methods.py* | TransformerLens, Captum |
-| **Null Space Projection** | Protect existing capabilities while updating model | `compute_null_space_projection()` with Fisher weighting | training_metrics.py* | Standard ML libraries |
-| **Intervention Vector Analysis** | Find corrective directions between model states | `find_intervention_vectors_enhanced()` with statistical significance | training_metrics.py* | Existing interpretability tools |
-| **Activation Patching** | Validate mechanistic hypotheses via causal intervention | `validate_with_activation_patching()` integrated with circuits | mechanistic_analyzer.py | Limited in other tools |
-| **Causal Importance Analysis** | Rigorous importance scoring via systematic ablation | `compute_causal_necessity()` with bootstrap CI | information_metrics.py* | Beyond standard attribution |
-
-*Note: Current filenames (FutureStudies.py → experimental_methods.py, BombshellMetrics.py → training_metrics.py, InformationTheoryMetrics.py → information_metrics.py) should be renamed for professionalism
+| **Surgical Head Freezing** | Selectively disable specific attention heads for causality testing | `freeze_attention_heads()` with zero/soft/identity modes | FutureStudies.py (⚠️ experimental) | TransformerLens, Captum |
+| **Null Space Projection** | Protect existing capabilities while updating model | `compute_null_space_projection()` with Fisher weighting | BombshellMetrics.py | Standard ML libraries |
+| **Intervention Vector Discovery** | Find corrective directions between healthy/broken models | `find_intervention_vectors_enhanced()` with statistical significance | BombshellMetrics.py | Existing interpretability tools |
+| **Activation Patching Validation** | Validate mechanistic hypotheses via causal intervention | `validate_with_activation_patching()` integrated with circuits | mechanistic_analyzer.py | Limited in other tools |
+| **Causal Necessity Analysis** | Rigorous importance scoring via systematic ablation | `compute_causal_necessity()` with bootstrap CI | InformationTheoryMetrics.py | Beyond standard attribution |
 
 These intervention methods enable researchers to:
 - **Test causal hypotheses** about which components matter for specific behaviors
