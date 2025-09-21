@@ -1,4 +1,4 @@
-# TensorScope: Automated Neural Network Diagnostic Discovery
+# TensorScope: Automated Neural Network Diagnostic Discovery (Alpha)
 
 A framework that runs 70+ diagnostic metrics to discover statistical correlations between internal model states and training outcomes. Built for researchers exploring what internal patterns predict model success or failure.
 
@@ -139,16 +139,50 @@ layer_analysis = grad_analyzer.compute_layer_gradient_alignment(model, task1_bat
 
 Each diagnostic method addresses specific failure modes, and they work together to provide comprehensive training analysis.
 
-## How TensorScope Complements Existing Tools
+## Why TensorScope Is Different
 
-| Tool | Primary Focus | Key Question Answered | When to Use |
-|------|--------------|----------------------|-------------|
-| **TensorBoard** | Metric visualization | "What are my metrics?" | Monitoring training progress |
-| **Weights & Biases** | Experiment tracking | "Which run performed best?" | Comparing experiments |
-| **Captum** | Model interpretation | "What did my model learn?" | Understanding model decisions |
-| **TensorScope** | Diagnostic discovery | "Which internal patterns correlate with outcomes?" | Discovering failure patterns |
+**The Problem**: Your model collapsed during training. You have the loss curve, but no idea why it happened or how to prevent it next time.
 
-TensorScope fills a gap in the ML tooling ecosystem by providing systematic diagnostics for training failures, complementing rather than replacing existing tools.
+### What Existing Tools Do vs. What You Actually Need
+
+| Tool | What It Shows You | What You Actually Need to Know |
+|------|------------------|--------------------------------|
+| **TensorBoard/W&B** | "Loss increased at step 10K" | WHY did loss increase? What internal state changed? |
+| **Captum** | "This token influenced this prediction" | Which training dynamics led to this behavior? |
+| **TransformerLens** | "Layer 23 implements an induction head" | Does this induction head predict training success? |
+
+### TensorScope's Unique Approach: Correlation Discovery
+
+**Instead of just showing you metrics, TensorScope discovers which internal states predict training outcomes.**
+
+Here's what TensorScope actually does:
+
+1. **Runs 70+ diagnostic metrics** on your checkpoints automatically:
+   - Gradient conflicts between tasks
+   - Attention pattern stability
+   - Loss landscape sharpness
+   - Dead neuron emergence
+   - Information bottlenecks
+   - And 65+ more...
+
+2. **Correlates everything with outcomes**:
+   - Which metrics at step 1K predict failure at step 10K?
+   - What combinations of metrics indicate impending collapse?
+   - Which layers show problems first?
+
+3. **Provides actionable insights**:
+   ```
+   DISCOVERED: Layer 67 gradient conflict > 0.8 at step 1K
+              correlates with training collapse (r=0.82, p<0.001)
+   PATTERN: Seen in 8/10 similar failures
+   ACTION: Monitor layer 67 conflicts; consider gradient surgery if >0.8
+   ```
+
+**Concrete Example:**
+- **Without TensorScope**: "Training failed. Try different hyperparameters?"
+- **With TensorScope**: "Gradient conflicts in layers 64-70 exceeded 0.8 at step 1K in all 5 failed runs, but stayed below 0.3 in successful runs. Add task-specific adapters at these layers."
+
+No other tool systematically discovers correlations between internal model states and training outcomes.
 
 ## Components
 
@@ -171,11 +205,14 @@ The framework includes three main modules:
 - Memory-efficient implementations for large-scale analysis
 - Unified interface for diverse metrics
 
-### Implementation Transparency: Reimplementations vs. Extensions
+### 4. Superposition Analysis (`SuperpositionMetrics.py`)
+- Feature interference and vector overlap analysis
+- Power law scaling analysis for neural scaling laws
+- Superposition strength quantification
+- Feature frequency distribution analysis
+- Representation capacity estimation
 
-**~85% of the codebase reimplements existing methods** from published papers. We provide these implementations for convenience and integration, but **the original papers should be cited**, not this repository.
-
-#### Reimplemented Methods (Original Papers Should Be Cited)
+#### Reimplemented Methods (Please Cite Both Original Papers and TensorScope)
 
 | Method | Original Paper | Our Implementation | Status |
 |--------|---------------|-------------------|---------|
@@ -190,6 +227,7 @@ The framework includes three main modules:
 | **Loss Landscapes** | Li et al. 2018 | `compute_loss_landscape_2d()` | 100% original |
 | **SAM/Sharpness** | Foret et al. 2021 | `compute_sam_sharpness()` | 100% original |
 | **Attention Rollout** | Abnar & Zuidema 2020 | `analyze_attention_flow()` | 100% original |
+| **Superposition Analysis** | Liu et al. 2025; Anthropic 2022 | `SuperpositionMetrics` module | Novel implementation based on papers |
 
 #### Our Extensions Beyond Original Papers (~15% of codebase)
 
@@ -212,11 +250,11 @@ These capabilities enable causal analysis and model surgery that isn't available
 
 | Capability | What It Enables | Implementation | Location | Not Available In |
 |------------|----------------|----------------|----------|------------------|
-| **Surgical Head Freezing** | Selectively disable specific attention heads for causality testing | `freeze_attention_heads()` with zero/soft/identity modes | FutureStudies.py (⚠️ experimental) | TransformerLens, Captum |
-| **Null Space Projection** | Protect existing capabilities while updating model | `compute_null_space_projection()` with Fisher weighting | BombshellMetrics.py | Standard ML libraries |
-| **Intervention Vector Discovery** | Find corrective directions between healthy/broken models | `find_intervention_vectors_enhanced()` with statistical significance | BombshellMetrics.py | Existing interpretability tools |
-| **Activation Patching Validation** | Validate mechanistic hypotheses via causal intervention | `validate_with_activation_patching()` integrated with circuits | mechanistic_analyzer.py | Limited in other tools |
-| **Causal Necessity Analysis** | Rigorous importance scoring via systematic ablation | `compute_causal_necessity()` with bootstrap CI | InformationTheoryMetrics.py | Beyond standard attribution |
+| **Selective Head Ablation** | Disable specific attention heads for causal analysis | `freeze_attention_heads()` with zero/soft/identity modes | experimental_methods.py* | TransformerLens, Captum |
+| **Null Space Projection** | Protect existing capabilities while updating model | `compute_null_space_projection()` with Fisher weighting | training_metrics.py* | Standard ML libraries |
+| **Intervention Vector Analysis** | Find corrective directions between model states | `find_intervention_vectors_enhanced()` with statistical significance | training_metrics.py* | Existing interpretability tools |
+| **Activation Patching** | Validate mechanistic hypotheses via causal intervention | `validate_with_activation_patching()` integrated with circuits | mechanistic_analyzer.py | Limited in other tools |
+| **Causal Importance Analysis** | Rigorous importance scoring via systematic ablation | `compute_causal_necessity()` with bootstrap CI | information_metrics.py* | Beyond standard attribution |
 
 These intervention methods enable researchers to:
 - **Test causal hypotheses** about which components matter for specific behaviors
@@ -241,6 +279,7 @@ These intervention methods enable researchers to:
 from ICLRMetrics import ICLRMetrics
 from InformationTheoryMetrics import InformationTheoryMetrics
 from established_analysis import EstablishedAnalysisMethods
+from SuperpositionMetrics import SuperpositionMetrics
 
 # Signal propagation analysis
 info_metrics = InformationTheoryMetrics()
@@ -251,6 +290,13 @@ print(f"Signal propagation regime: {result['regime']}")
 iclr_metrics = ICLRMetrics()
 conflict = iclr_metrics.compute_gradient_conflict_pcgrad(model, task1_batch, task2_batch)
 print(f"Task conflict score: {conflict['conflict_score']:.3f}")
+
+# Superposition and scaling analysis
+sup_metrics = SuperpositionMetrics()
+interference = sup_metrics.compute_vector_interference(model.embedding.weight)
+print(f"Mean feature overlap: {interference['mean_overlap']:.4f}")
+strength = sup_metrics.compute_superposition_strength(model, test_batch)
+print(f"Superposition ratio: {strength['superposition_ratio']:.2f}x")
 
 # Attribution and sensitivity analysis (replaces representation_analysis)
 analyzer = EstablishedAnalysisMethods(model, tokenizer)
@@ -272,6 +318,8 @@ print(f"Most important token: {importance['attributions'].argmax()}")
 - **`GradientAnalysis.py`** (1,441 lines) - Consolidated gradient diagnostics: pathology detection, multi-task conflicts, PCGrad, alignment tracking
 - **`ModularityMetrics.py`** (1,151 lines) - Task interference analysis: Fisher information, task vectors, elasticity, TIES-merging conflicts
 - **`LotteryTicketAnalysis.py`** (1,148 lines) - Sparse network analysis: lottery tickets, pruning sensitivity, magnitude tracking, iterative pruning
+- **`manifold_adaptive_sampling.py`** - Intelligent sample size selection for manifold analysis based on data size and time constraints
+- **`manifold_violations/`** - Implementation of Robinson et al. (2024) "Token Embeddings Violate the Manifold Hypothesis": fiber bundle tests, Ricci curvature analysis, prompt robustness testing
 
 ### Catastrophic Forgetting Analysis
 - **`CFA-2-complete.py`** (1,453 lines) - Complete catastrophic forgetting analyzer: integrates all metrics for systematic forgetting analysis across checkpoints
@@ -432,6 +480,38 @@ Methods are organized by their actual file location for easy reference.
 - `compute_logit_lens`: Intermediate layer predictions
 - `compute_output_entropy`: Output distribution analysis
 - `analyze_complete`: Run full mechanistic analysis pipeline
+
+### 12. **Superposition and Scaling Analysis (SuperpositionMetrics.py)**
+- `compute_vector_interference`: Measure feature vector overlaps and interference
+- `compute_feature_frequency_distribution`: Analyze feature frequency with power law fitting
+- `compute_superposition_strength`: Quantify degree of feature superposition
+- `analyze_dimensional_scaling`: Study loss scaling with model dimension
+- `compute_feature_sparsity`: Measure sparsity of feature representations
+- `fit_scaling_law`: Fit power laws to loss vs model size (L ∝ N^(-α))
+- `compute_representation_capacity`: Estimate feature packing capacity
+- `analyze_feature_emergence`: Track feature organization during training
+
+### 13. **Manifold Analysis & Violations**
+
+**manifold_adaptive_sampling.py:**
+- `get_adaptive_manifold_samples`: Intelligent sample size selection based on time budget ("fast", "balanced", "thorough")
+- Balances statistical reliability vs computation time
+- Adaptive sampling for manifold curvature analysis
+
+**manifold_violations/ (Robinson et al. 2024 Implementation):**
+- `RobinsonFiberBundleTest`: Test fiber bundle hypothesis on embeddings
+- `compute_ricci_curvature_debiased`: Ollivier-Ricci curvature for geometric analysis
+- `fiber_bundle_core.py`: Core fiber bundle hypothesis tests
+- `singularity_mapper.py`: Detect polysemy singularities in embedding space
+- `prompt_robustness_analyzer.py`: Test prompt stability across perturbations
+- `token_stability_analyzer.py`: Token-level stability analysis
+- `tractable_manifold_curvature_fixed.py`: Efficient curvature computation
+- `training_singularity_dynamics.py`: Track singularities during training
+
+Key insight: Robinson et al. proved the manifold hypothesis fails for LLM embeddings, causing:
+- Prompt instability (semantically equivalent prompts → different outputs)
+- Model non-portability (prompts fail across models)
+- Polysemy singularities (multiple meanings create embedding "black holes")
 
 ## 🔍 Gradient Analysis Functions - When to Use What
 
@@ -646,8 +726,6 @@ Complete framework for analyzing catastrophic forgetting:
 
 ## Original Papers & Citations
 
-**Please cite the original papers, not this repository:**
-
 - **Signal Propagation**: Inspired by Schoenholz et al. (2017). "Deep Information Propagation"
 - **Information Flow**: Various MI estimation techniques (InfoNCE, MINE)  
 - **Integrated Gradients**: Sundararajan et al. (2017). "Axiomatic Attribution for Deep Networks"
@@ -682,7 +760,7 @@ MIT License - See LICENSE file
   title={TensorScope: Complete Neural Network Analysis Suite for Dynamics, Information Flow, Geometry & Emergent Phenomena},
   author={[Authors]},
   year={2024},
-  url={https://github.com/[username]/TensorScope}
+  url={https://github.com/johnsweeney25/TensorScope}
 }
 ```
 
