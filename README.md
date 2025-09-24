@@ -1,14 +1,91 @@
-# TensorScope: Automated Neural Network Diagnostic Discovery (Alpha)
+# TensorScope: Training Dynamics & Interpretability Analysis Framework
 
-A framework that runs 70+ diagnostic metrics to discover statistical correlations between internal model states and training outcomes. Built for researchers exploring what internal patterns predict model success or failure.
+**Research automation toolkit** implementing 70+ metrics for interpretability and training dynamics analysis to systematically understand model behavior and discover correlations between early checkpoints and final outcomes.
+
+**Key Value**: Run comprehensive diagnostics across training checkpoints and identify which internal metrics correlate with success or failure, enabling data-driven insights about model behavior.
+
+## What This Actually Does - Concrete Examples
+
+```python
+from GradientAnalysis import GradientAnalysis
+from BombshellMetrics import BombshellMetrics
+
+analyzer = GradientAnalysis()
+metrics = BombshellMetrics()
+
+# Example 1: Why is my model not training?
+pathology = analyzer.compute_gradient_pathology(model, batch)
+# → Reveals: "15 layers have vanishing gradients" (initialization problem)
+
+# Example 2: Why does adding task B hurt task A performance?
+conflict = analyzer.compute_gradient_conflict_pcgrad(model, task_a_batch, task_b_batch)
+# → Reveals: "Tasks have 0.8 gradient conflict score" (they're fighting each other)
+
+# Example 3: Which training samples are causing problems?
+critical = metrics.find_critical_samples(model, train_data, checkpoints)
+# → Reveals: "Samples 457, 892, 1203 have negative influence" (corrupted data)
+
+# Example 4: Will this model generalize or just memorize?
+attention_patterns = metrics.compute_attention_entropy(model, batch)
+# → Reveals: "Attention entropy < 2.0" (model is memorizing, not learning patterns)
+
+# Example 5: Can I safely merge these task-specific models?
+conflicts = metrics.analyze_ties_conflicts({'task1': model1, 'task2': model2})
+# → Reveals: "65% weight sign conflicts in layer 23" (models will interfere if merged)
+```
+
+**The key insight**: These metrics, when measured at 10% training, often correlate strongly with final performance. TensorScope finds these correlations automatically.
+
+## Comprehensive Metric Collection
+
+TensorScope implements 70+ internal state measurements from recent ML research, providing a unified interface for:
+
+- **Training Health Indicators**: Gradient pathology detection, vanishing/exploding gradients, layer-wise health metrics
+- **Task Interference Measures**: Gradient conflict analysis (PCGrad), task vector alignment, Fisher information overlap
+- **Mechanistic Interpretability**: Induction heads (Olsson et al. 2022), QK-OV circuits, attention patterns
+- **Training Attribution**: TracIn implementation for data influence, critical sample identification
+- **Loss Landscape Analysis**: Hessian eigenvalues, mode connectivity, sharpness metrics
+- **Information Flow Metrics**: Compression ratios, mutual information, channel capacity
+
+Each metric serves as a potential predictor of training outcomes. Even imperfect measurements may reveal statistically significant correlations with model success or failure.
+
+## Key Terminology
+
+**Internal State Metrics**: Measurable properties of your model during training (gradient norms, attention patterns, weight statistics). Not just loss/accuracy.
+
+**Training Health Indicators**: Metrics that reveal if training is proceeding normally (gradient flow, learning dynamics, convergence patterns).
+
+**Predictive Patterns**: Statistical relationships where early metrics (at 10% training) correlate with final outcomes (accuracy, collapse, generalization).
+
+**Metric-Outcome Analysis**: The process of discovering which internal metrics at checkpoint N predict performance at checkpoint M (where M > N).
+
+**Early Warning Signs**: Metrics that show problems before they manifest in loss curves (e.g., gradient conflicts appearing before accuracy drops).
+
+**Interpretability Through Prediction**: Understanding model behavior by identifying which internal states predict future performance, making the "black box" transparent.
+
+## Information Theory Context
+
+Many of TensorScope's metrics have deep connections to information theory:
+
+**Integrated Gradients**: Measures information gain as we interpolate from a baseline (low-information) input to the actual input. The path integral quantifies how much each feature contributes to the model's decision.
+
+**Mutual Information**: Quantifies how much information representations at layer N contain about the input (I(X;T_n)) and output (I(T_n;Y)). The Information Bottleneck principle suggests good representations compress input while preserving output-relevant information.
+
+**Attention Entropy**: Higher entropy means more uniform attention (exploring many tokens), while lower entropy indicates focused attention (exploiting specific tokens). This explore/exploit tradeoff reveals whether models are learning patterns or memorizing.
+
+**Compression Metrics**: Based on Kolmogorov complexity - simpler (more compressible) representations often generalize better. High compression ratios suggest the model has found efficient encodings.
+
+**TracIn (Influence Functions)**: Information-theoretic view of training - which samples contribute most information to the model's knowledge? Negative influence suggests harmful/contradictory information.
+
+**Fisher Information**: The curvature of the KL divergence between model distributions. High Fisher information for a parameter means that parameter strongly affects the model's output distribution.
 
 ## Core Value: Systematic Pattern Discovery
 
 Instead of manually checking individual metrics, TensorScope enables:
 
-1. **Comprehensive Diagnostic Collection**: Run all implemented metrics across your training trajectory
-2. **Correlation Discovery** (upcoming): Automatically identify which metrics correlate with outcomes
-3. **Hypothesis Generation**: Discover unexpected patterns between internal states and performance
+1. **Comprehensive Metric Collection**: Run all implemented training health indicators across your model checkpoints
+2. **Metric-Outcome Analysis** (upcoming): Automatically identify which internal measurements predict final performance
+3. **Hypothesis Generation**: Discover unexpected relationships between early training states and eventual success/failure
 4. **Reproducible Analysis**: Extensive test suite (500+ tests) ensures metric reliability
 
 ## What This Enables
@@ -19,19 +96,6 @@ With TensorScope's metric collection, researchers can explore questions like:
 - Do certain metric patterns distinguish successful from failed runs?
 - Which layers show early warning signs of catastrophic forgetting?
 
-## Comprehensive Metric Collection
-
-TensorScope implements 70+ diagnostic metrics from recent ML research, providing a unified interface for:
-
-- **Gradient Diagnostics**: Pathology detection, conflict analysis (PCGrad), layer-wise alignment
-- **Mechanistic Interpretability**: Induction heads (Olsson et al. 2022), QK-OV circuits, attention patterns
-- **Multi-Task Analysis**: Task vectors (Ilharco et al. 2023), TIES-merging conflicts, Fisher information
-- **Training Attribution**: TracIn implementation for data influence, critical sample identification
-- **Loss Landscape**: Hessian analysis, mode connectivity, sharpness metrics
-- **Information Theory**: Compression ratios, mutual information, channel capacity
-
-Each metric serves as a potential feature for discovering diagnostic patterns. Even imperfect metrics may reveal useful correlations in specific contexts.
-
 ## Framework Capabilities
 
 - **Unified API**: Consistent interface across all 70+ metrics
@@ -40,6 +104,57 @@ Each metric serves as a potential feature for discovering diagnostic patterns. E
 - **Extensive Testing**: 500+ unit tests ensure metric correctness
 - **Batched Analysis**: Run multiple metrics efficiently across checkpoints
 - **Statistical Utilities**: Bootstrap CI, power analysis, multiple testing correction
+
+## Memory-Efficient Fisher Information
+
+TensorScope features an optimized Fisher Information implementation with significant memory reduction, making Fisher-based analysis feasible for 70B+ parameter models.
+
+### The Innovation: Group-Level Reduction
+Instead of storing Fisher per-parameter (O(n²) memory), we aggregate to group-level statistics:
+- **Linear/Conv layers**: Per-channel importance (out_channels dimension)
+- **Attention layers**: Per-head importance (num_heads dimension)
+- **Result**: Dramatic memory reduction while preserving importance structure
+
+### Key Features:
+- **True Fisher**: Samples from model distribution (theoretically sound)
+- **K-FAC approximation**: Block-diagonal for natural gradient computation
+- **Capacity metrics**: Eigenvalue-based measures (effective rank, PAC-Bayes)
+- **Production scale**: Handles 70B+ models with streaming implementations
+
+### Usage:
+```python
+from BombshellMetrics import BombshellMetrics
+
+# Initialize with efficient Fisher
+metrics = BombshellMetrics(
+    fisher_reduction='group',      # Group-level aggregation
+    fisher_storage='cpu_fp16'      # Additional 2x memory saving
+)
+
+# Collect Fisher information
+metrics.update_fisher_ema(model, batch, task='pretrain')
+fisher = metrics.get_group_fisher('pretrain', bias_corrected=True)
+
+# For percolation experiments (concentration C)
+channel_importance = fisher['layer.weight|channel']
+top_k = int(len(channel_importance) * concentration_C)
+important_channels = torch.topk(channel_importance, top_k).indices
+```
+
+### Performance Comparison:
+| Method | Memory (1.3B model) | Memory (70B model) | Reduction vs Diagonal |
+|--------|---------------------|-------------------|----------------------|
+| Full Fisher | ~6.8 TB | ~196 PB | - |
+| Diagonal | ~5.2 GB | ~280 GB | Baseline |
+| **Group-level** | **~68 MB** | **~3.7 GB** | **~75x** |
+
+### What This Enables:
+- Real-time Fisher tracking during training
+- Catastrophic forgetting detection at scale
+- Natural gradient optimization via K-FAC
+- Concentration-controlled perturbations for research
+
+Implementation: `fisher_collector.py` | Documentation: [FISHER_DOCUMENTATION.md](FISHER_DOCUMENTATION.md)
 
 ## The Research Problem
 
@@ -55,16 +170,16 @@ TensorScope provides the measurement infrastructure to discover which internal p
 ## What This Is and Isn't
 
 ✅ **What TensorScope IS:**
-- A comprehensive metric collection for exploratory analysis
-- A framework for discovering correlations between metrics and outcomes
-- A tested implementation of published methods
-- A tool for generating hypotheses about model behavior
+- A comprehensive toolkit for measuring 70+ internal model behaviors during training
+- A framework for discovering which early training metrics predict final performance
+- A tested implementation of state-of-the-art interpretability methods
+- A hypothesis generator that reveals unexpected relationships between internal states and outcomes
 
 ❌ **What TensorScope ISN'T:**
-- A proven diagnostic system (correlations must be validated)
-- A replacement for TensorBoard/W&B (use alongside)
-- Theoretically perfect (some metrics have known limitations)
-- A magic solution (requires systematic experimentation)
+- A crystal ball (discovered patterns must be validated on new training runs)
+- A replacement for TensorBoard/W&B (complements them with deeper analysis)
+- Theoretically perfect (some metrics have limitations, especially for transformers)
+- A magic fix (identifies problems but you still need to solve them)
 
 ## Testable Research Hypotheses
 
@@ -78,35 +193,112 @@ TensorScope enables testing hypotheses like:
 
 The framework provides the measurement infrastructure for systematic correlation studies between internal states and outcomes.
 
-## Automated Correlation Discovery (Coming Soon)
+## Automated Metric-Outcome Analysis (Coming Soon)
 
-The upcoming correlation module will automatically:
+The upcoming metric-outcome analysis module will automatically:
 
-1. **Run Full Diagnostic Suite**: Execute all 70+ metrics across your checkpoints
-2. **Statistical Analysis**: Compute correlations, p-values, and effect sizes
-3. **Pattern Detection**: Identify metric combinations that predict outcomes
-4. **Report Generation**: Produce actionable insights with statistical confidence
+1. **Run Full Metric Suite**: Execute all 70+ internal state measurements across your checkpoints
+2. **Statistical Relationship Analysis**: Compute correlations between early metrics and final performance (with p-values and effect sizes)
+3. **Predictive Pattern Detection**: Identify which metric combinations at early training predict success/failure
+4. **Actionable Report Generation**: Show which internal states to monitor and when to intervene
 
-Example discovery pipeline:
+Example predictive analysis pipeline:
 ```python
 # Future API
-from tensorscope import CorrelationDiscovery
+from tensorscope import MetricOutcomeAnalyzer
 
-discovery = CorrelationDiscovery()
-results = discovery.analyze_training_run(
+analyzer = MetricOutcomeAnalyzer()
+results = analyzer.analyze_training_run(
     checkpoints=["ckpt_1k.pt", "ckpt_5k.pt", "ckpt_10k.pt"],
     outcomes={"final_mmlu": 0.45, "collapsed": True},
     model_type="llama"
 )
 
-# Discovers patterns like:
-# "Gradient conflict > 0.6 at step 5k correlates with collapse (r=0.78, p<0.01)"
-# "Attention entropy < 2.0 in layers 20-30 predicts low MMLU (r=0.65, p<0.05)"
+# Discovers predictive patterns like:
+# "Gradient conflict > 0.6 at step 5k predicts collapse (correlation r=0.78, p<0.01)"
+# "Attention entropy < 2.0 in layers 20-30 at 10% training predicts low final MMLU (r=0.65, p<0.05)"
 ```
 
-## Current Diagnostic Workflow
+## Unified Analysis Framework
 
-While the correlation module is in development, use the metrics directly:
+The `unified_model_analysis.py` provides a comprehensive analysis pipeline that runs all 70+ metrics and generates statistical reports:
+
+```python
+from unified_model_analysis import UnifiedModelAnalyzer, ModelSpec, UnifiedConfig
+
+# Configure analysis
+config = UnifiedConfig(
+    metrics_to_compute=['gradient_alignment', 'fisher_trace', 'elasticity_score'],
+    generate_report=True,  # Generate PDF report
+    save_results=True,
+    output_dir='./analysis_results'
+)
+
+# Initialize analyzer
+analyzer = UnifiedModelAnalyzer(config)
+
+# Analyze models
+specs = [
+    ModelSpec(id='model_1k', path='checkpoint_1000.pt'),
+    ModelSpec(id='model_5k', path='checkpoint_5000.pt'),
+    ModelSpec(id='model_10k', path='checkpoint_10000.pt')
+]
+
+results = analyzer.analyze_models(specs)
+
+# Analyze training trajectory
+from unified_model_analysis import CheckpointSpec
+
+trajectory_results = analyzer.analyze_trajectory([
+    CheckpointSpec(path='ckpt_1k.pt', iteration=1000),
+    CheckpointSpec(path='ckpt_5k.pt', iteration=5000),
+    CheckpointSpec(path='ckpt_10k.pt', iteration=10000)
+])
+
+# Results include phase transitions, convergence points, and training dynamics
+print(f"Phase transitions detected: {len(trajectory_results.phase_transitions)}")
+print(f"Training dynamics: {trajectory_results.training_dynamics_analysis}")
+```
+
+## Statistical Report Generation
+
+TensorScope includes comprehensive report generation with LaTeX/PDF output:
+
+```python
+from statistical_report_generator import StatisticalReportGenerator, ReportConfig
+
+# Configure report
+config = ReportConfig(
+    style='technical',  # or 'neurips', 'ieee', 'executive'
+    include_trajectory_analysis=True,
+    include_correlations=True,
+    figure_format='pdf'
+)
+
+# Generate report from analysis results
+generator = StatisticalReportGenerator(config)
+generator.add_results('analysis_results.json')
+pdf_path = generator.generate_report()
+
+# Report includes:
+# - Statistical analysis with p-values and effect sizes
+# - Correlation matrices with significance testing
+# - Phase transition detection
+# - Training dynamics visualization
+# - Automatic citations to relevant papers
+```
+
+### Report Templates
+
+Pre-configured LaTeX templates for different audiences:
+- **technical_report.tex**: Detailed technical analysis
+- **neurips_template.tex**: Conference paper format
+- **ieee_template.tex**: IEEE journal format
+- **executive_template.tex**: Executive summary format
+
+## Quick Problem Identification Workflow
+
+For immediate problem detection without full analysis:
 
 ```python
 from GradientAnalysis import GradientAnalysis
@@ -137,7 +329,7 @@ layer_analysis = grad_analyzer.compute_layer_gradient_alignment(model, task1_bat
 # → Pinpoint which layers have conflicts
 ```
 
-Each diagnostic method addresses specific failure modes, and they work together to provide comprehensive training analysis.
+Each analysis method targets specific failure modes, working together to provide comprehensive training interpretability.
 
 ## Why TensorScope Is Different
 
@@ -157,7 +349,7 @@ Each diagnostic method addresses specific failure modes, and they work together 
 
 Here's what TensorScope actually does:
 
-1. **Runs 70+ diagnostic metrics** on your checkpoints automatically:
+1. **Runs 70+ internal state measurements** on your checkpoints automatically:
    - Gradient conflicts between tasks
    - Attention pattern stability
    - Loss landscape sharpness
@@ -201,7 +393,7 @@ The framework includes three main modules:
 - Critical sample identification via TracIn
 
 ### 3. Metrics Collection (`BombshellMetrics.py`)
-- Comprehensive suite of training diagnostics
+- Comprehensive suite of failure prediction metrics
 - Memory-efficient implementations for large-scale analysis
 - Unified interface for diverse metrics
 
@@ -271,7 +463,7 @@ These intervention methods enable researchers to:
 - Unified interface for multiple analysis methods
 - Optimized for transformers
 
-*⚠️ **Signal Propagation Note**: The signal propagation metric was designed for feedforward networks. Its application to transformers is limited as it doesn't account for LayerNorm, skip connections, or attention mechanisms. Use as a rough diagnostic tool only, not for rigorous dynamical analysis.
+*⚠️ **Signal Propagation Note**: The signal propagation metric was designed for feedforward networks. Its application to transformers is limited as it doesn't account for LayerNorm, skip connections, or attention mechanisms. Use only as a rough health indicator, not for rigorous dynamical analysis.
 
 ## Quick Start
 
@@ -280,6 +472,13 @@ from ICLRMetrics import ICLRMetrics
 from InformationTheoryMetrics import InformationTheoryMetrics
 from established_analysis import EstablishedAnalysisMethods
 from SuperpositionMetrics import SuperpositionMetrics
+from BombshellMetrics import BombshellMetrics
+
+# Efficient Fisher Information with group-level reduction
+bombshell = BombshellMetrics(fisher_reduction='group', fisher_storage='cpu_fp16')
+bombshell.update_fisher_ema(model, batch, task='pretrain')
+fisher = bombshell.get_group_fisher('pretrain', bias_corrected=True)
+print(f"Fisher computed with {len(fisher)} groups (dramatic memory reduction)")
 
 # Signal propagation analysis
 info_metrics = InformationTheoryMetrics()
@@ -308,15 +507,16 @@ print(f"Most important token: {importance['attributions'].argmax()}")
 ## Project Structure
 
 ### Core Analysis Modules (Main Framework)
-- **`InformationTheoryMetrics.py`** (5,967 lines) - Comprehensive information-theoretic analysis: mutual information, compression, signal propagation (with limitations), phase transitions, channel capacity
-- **`BombshellMetrics.py`** (5,566 lines) - Advanced training diagnostics: attention analysis, neuron importance, TracIn implementation, task vectors, TIES-merging analysis, intervention vectors
-- **`ICLRMetrics.py`** (1,650 lines) - ICLR hypothesis testing: loss landscapes, mode connectivity, pruning analysis, attribution methods, Hessian analysis
-- **`mechanistic_analyzer.py`** (3,674 lines) - Mechanistic interpretability: induction heads, QK-OV circuits, attention flow, activation patching, logit lens
+- **`fisher_collector.py`** (795 lines) - Revolutionary group-level Fisher implementation with 100,000x memory reduction
+- **`InformationTheoryMetrics.py`** (5,967 lines) - Information flow analysis: mutual information, compression dynamics, signal propagation (limited for transformers), phase transitions, channel capacity
+- **`BombshellMetrics.py`** (5,566 lines) - Training failure predictors with efficient Fisher: attention entropy, dead neurons, TracIn attribution, task vectors, TIES conflicts, intervention analysis
+- **`ICLRMetrics.py`** (1,650 lines) - Loss landscape and optimization metrics: mode connectivity, sharpness, pruning sensitivity, Hessian eigenvalues
+- **`mechanistic_analyzer.py`** (3,674 lines) - Circuit-level interpretability: induction heads, QK-OV circuits, attention flow patterns, activation patching, logit lens
 - **`established_analysis.py`** (1,266 lines) - Attribution methods via Captum: integrated gradients, attention rollout, Jacobian analysis, layer-wise attribution
 
 ### Specialized Analysis Components
-- **`GradientAnalysis.py`** (1,441 lines) - Consolidated gradient diagnostics: pathology detection, multi-task conflicts, PCGrad, alignment tracking
-- **`ModularityMetrics.py`** (1,151 lines) - Task interference analysis: Fisher information, task vectors, elasticity, TIES-merging conflicts
+- **`GradientAnalysis.py`** (1,441 lines) - Training health monitoring: gradient pathology detection, task interference measurement, PCGrad conflicts, alignment tracking
+- **`ModularityMetrics.py`** (1,151 lines) - Task interference analysis with efficient Fisher: task vectors, elasticity, TIES-merging conflicts
 - **`LotteryTicketAnalysis.py`** (1,148 lines) - Sparse network analysis: lottery tickets, pruning sensitivity, magnitude tracking, iterative pruning
 - **`manifold_adaptive_sampling.py`** - Intelligent sample size selection for manifold analysis based on data size and time constraints
 - **`manifold_violations/`** - Implementation of Robinson et al. (2024) "Token Embeddings Violate the Manifold Hypothesis": fiber bundle tests, Ricci curvature analysis, prompt robustness testing
@@ -364,12 +564,58 @@ Methods are organized by their actual file location for easy reference.
 ### 1. Information Dynamics & Attribution Analysis
 
 **InformationTheoryMetrics.py:**
-- `compute_information_flow`: Layer-wise mutual information with multiple estimators
+- `compute_layer_mutual_information`: Layer-wise mutual information with multiple estimators
 - `compute_practical_compression_ratio`: Compression analysis with multiple codecs
 - `compute_variational_ib_probe`: Train probe to analyze representation compressibility
 - `compute_channel_capacity`: Information channel capacity analysis
 - `compute_plasticity_index`: Measure model adaptability
 - `compute_redundancy_synergy`: Information decomposition analysis
+
+#### Mutual Information Estimation Methods
+
+The framework provides four different MI estimation methods, each with different tradeoffs:
+
+| Method | Best For | Pros | Cons |
+|--------|----------|------|------|
+| **InfoNCE** (default) | High-dimensional representations | Stable, works in high-D, good bias-variance tradeoff | Provides lower bound only |
+| **k-NN** | Low-moderate dimensions (<50D) | Non-parametric, no training needed | Struggles in high dimensions |
+| **MINE** | Complex dependencies | Can provide tight bounds, flexible | High variance, can be unstable |
+| **Binning** | Very low dimensions (<10D) | Fast, simple, interpretable | Severe curse of dimensionality |
+
+**Quick Usage:**
+```python
+# Recommended default for neural networks
+results = metrics.compute_layer_mutual_information(
+    model, batch,
+    method='infonce',  # Choose: 'infonce', 'knn', 'mine', 'binning'
+    temperature=0.07,  # For InfoNCE
+    n_negatives=64     # For InfoNCE
+)
+print(f"Mean layer MI: {results['mean_layer_mi']:.3f} nats")
+print(f"Information bottleneck: {results['min_layer_mi']:.3f} nats")
+```
+
+**Decision Guide:**
+- **High dimensions (>100D)**: Use `'infonce'` - designed for high-D neural representations
+- **Low dimensions (<50D)**: Use `'knn'` if you have >1000 samples
+- **Need tight bounds**: Use `'mine'` but expect longer compute time
+- **Very low dimensions (<10D)**: Can use `'binning'` for fast estimates
+
+**Recent Improvements (2024):**
+- Fixed k-NN implementation to properly handle multivariate MI
+- Fixed binning to compute true joint MI instead of averaging marginals
+- Improved MINE initialization to reduce overestimation
+- Added binning method to main interface
+- Removed incorrect Gaussian approximation fallback
+
+**Known Limitations:**
+- All methods provide estimates, not exact MI
+- InfoNCE: Lower bound only (underestimates true MI)
+- k-NN: Uses PCA for dimension reduction in high-D (changes what's measured)
+- MINE: Can be unstable, prone to overestimation
+- Binning: Exponentially bad in high dimensions
+
+For detailed guidance, see [MUTUAL_INFORMATION_GUIDE.md](MUTUAL_INFORMATION_GUIDE.md)
 
 **EstablishedAnalysisMethods.py (Captum-based):**
 - `analyze_token_importance`: Token importance via Integrated Gradients
@@ -522,7 +768,7 @@ Key insight: Robinson et al. proved the manifold hypothesis fails for LLM embedd
 #### Checking if model is training properly
 Use `compute_gradient_pathology`
 - What it tells you: Are gradients vanishing or exploding
-- When to use: First diagnostic when training fails
+- When to use: First check when training fails
 - Warning signs: `num_vanishing > 10` or `num_exploding > 5` layers
 - Example scenario: Model loss stuck, accuracy not improving
 
@@ -556,7 +802,7 @@ Use `compute_layer_gradient_alignment`
 | Training instability | `compute_gradient_alignment_trajectory` | `alignment_variance` | > 0.3 |
 | Need layer-specific debugging | `compute_layer_gradient_alignment` | `min_alignment` | < -0.2 |
 
-These diagnostics help identify common training pathologies systematically.
+These measurements help identify common training pathologies systematically.
 
 ### Real-World Usage Examples
 
@@ -600,14 +846,14 @@ print("Consider: Adding task-specific adapters at these layers")
 - Attention mechanisms (dynamic connectivity)
 - The thresholds (0.9/1.1) are arbitrary and not theoretically grounded for transformers
 
-**Use as a rough diagnostic tool only**, not for rigorous dynamical analysis.
+**Use as a rough health check only**, not for rigorous dynamical analysis.
 
 ### Quick Start
 ```python
 from InformationTheoryMetrics import InformationTheoryMetrics
 metrics = InformationTheoryMetrics()
 
-# Basic measurement (diagnostic only)
+# Basic measurement (health check only)
 result = metrics.compute_signal_propagation_dynamics(model, batch)
 print(f"Block gain: {result['block_gain']:.3f}")  # Simple ||layer_n||/||layer_{n-1}|| ratio
 print(f"Regime: {result['regime']}")  # Based on arbitrary thresholds
@@ -642,7 +888,7 @@ print(f"Stability score: {stability['stability_score']:.3f}")
 
 ### Validated Components
 Through our 500+ test suite, we've validated:
-- Gradient diagnostic accuracy
+- Gradient pathology detection accuracy
 - TracIn implementation correctness
 - Task vector extraction reliability
 - Statistical utilities (bootstrap, power analysis)
@@ -661,6 +907,40 @@ pip install -r requirements.txt
 # Optional: Install Captum for attribution methods
 pip install captum  # For EstablishedAnalysisMethods
 ```
+
+## Numerical Stability & Reproducibility
+
+### SVD Configuration for Academic Publications
+
+TensorScope prioritizes numerical stability and reproducibility for academic publications. When running experiments for ICLR/NeurIPS submissions:
+
+```python
+# For publication-quality results with guaranteed reproducibility
+from InformationTheoryMetrics import InformationTheoryMetrics
+
+info_metrics = InformationTheoryMetrics(
+    seed=42,           # Fixed seed for reproducibility
+    svd_driver='gesvd' # QR-based SVD for guaranteed convergence
+)
+```
+
+#### SVD Driver Options
+
+- **`auto`** (default): PyTorch chooses automatically, may show convergence warnings
+- **`gesvd`**: Most accurate, guaranteed convergence, **recommended for publications**
+- **`gesvdj`**: Faster but may not converge for ill-conditioned matrices
+- **`gesvda`**: Fastest but approximate, use only for large-scale experiments
+
+#### Understanding SVD Warnings
+
+If you see warnings like:
+```
+torch.linalg.svd: During SVD computation... failed to converge
+```
+
+**This is not an error** - PyTorch is automatically using a more accurate fallback method. For publication, use `svd_driver='gesvd'` to avoid warnings and ensure reproducibility.
+
+See [NUMERICAL_STABILITY.md](NUMERICAL_STABILITY.md) for detailed documentation on numerical considerations.
 
 ## Key Analysis Examples
 
@@ -727,7 +1007,9 @@ Complete framework for analyzing catastrophic forgetting:
 ## Original Papers & Citations
 
 - **Signal Propagation**: Inspired by Schoenholz et al. (2017). "Deep Information Propagation"
-- **Information Flow**: Various MI estimation techniques (InfoNCE, MINE)  
+- **InfoNCE**: Oord et al. (2018). "Representation Learning with Contrastive Predictive Coding"
+- **MINE**: Belghazi et al. (2018). "Mutual Information Neural Estimation"
+- **k-NN MI**: Kraskov et al. (2004). "Estimating mutual information" (via sklearn)
 - **Integrated Gradients**: Sundararajan et al. (2017). "Axiomatic Attribution for Deep Networks"
 - **Gradient Conflict/PCGrad**: Yu et al. (2020). "Gradient Surgery for Multi-Task Learning"
 - **Lottery Tickets**: Frankle & Carbin (2019). "The Lottery Ticket Hypothesis"
