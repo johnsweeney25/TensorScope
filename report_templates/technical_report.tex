@@ -1,0 +1,377 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage{color}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+
+% Page geometry
+\geometry{
+    left=25mm,
+    right=25mm,
+    top=30mm,
+    bottom=30mm
+}
+
+% Colors
+\definecolor{primarycolor}{RGB}{0,102,204}
+\definecolor{secondarycolor}{RGB}{255,102,0}
+\definecolor{lightgray}{RGB}{245,245,245}
+\definecolor{darkgray}{RGB}{100,100,100}
+
+% Headers and footers
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small \textcolor{darkgray}{{{ title }}}}
+\fancyhead[R]{\small \textcolor{darkgray}{{{ date }}}}
+\fancyfoot[C]{\small Page \thepage\ of \pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+
+% Section formatting
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries\color{primarycolor}}{Section \thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries\color{darkgray}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{1em}{}
+
+% Code listings
+\lstset{
+    basicstyle=\small\ttfamily,
+    backgroundcolor=\color{lightgray},
+    breaklines=true,
+    frame=single,
+    frameround=tttt,
+    numbers=left,
+    numberstyle=\tiny\color{darkgray},
+    keywordstyle=\color{primarycolor}\bfseries,
+    commentstyle=\color{darkgray}\itshape,
+    stringstyle=\color{secondarycolor}
+}
+
+% Custom commands
+\newcommand{\metric}[1]{\texttt{#1}}
+\newcommand{\model}[1]{\textbf{#1}}
+\newcommand{\pvalue}[1]{$p = #1$}
+\newcommand{\effectsize}[2]{Cohen's $d = #1$ (#2)}
+
+% Document info
+\title{
+    \vspace{-2cm}
+    {\Huge\bfseries\color{primarycolor} {{ title }}}\\
+    \vspace{0.5cm}
+    {\large Statistical Analysis of Model Performance Metrics}\\
+    \vspace{0.5cm}
+    \rule{\textwidth}{0.4pt}
+}
+\author{
+    {{ author }}\\
+    \small {{ affiliation }}
+}
+\date{{ '{' }}{{ date }}{{ '}' }}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+% Abstract/Executive Summary
+\section*{Executive Summary}
+\addcontentsline{toc}{section}{Executive Summary}
+
+{{ executive_summary }}
+
+\newpage
+\tableofcontents
+\newpage
+
+% Introduction
+\section{Introduction}
+
+This report presents a comprehensive statistical analysis of model performance metrics collected from {{ analysis_description }}. The analysis encompasses {{ n_metrics }} distinct metrics evaluated across {{ n_samples }} samples.
+
+\subsection{Objectives}
+
+The primary objectives of this analysis are:
+\begin{itemize}
+    \item Characterize the distribution and behavior of performance metrics
+    \item Identify significant correlations between metrics
+    \item Compare performance across different model configurations
+    \item Provide actionable insights for model improvement
+\end{itemize}
+
+% Methodology
+\section{Methodology}
+
+\subsection{Data Collection}
+
+{{ data_collection }}
+
+\subsection{Statistical Methods}
+
+The following statistical methods were employed:
+
+\begin{itemize}
+    \item \textbf{Descriptive Statistics}: Mean, median, standard deviation, and distributional characteristics
+    \item \textbf{Correlation Analysis}: Spearman rank correlation for robust correlation assessment
+    \item \textbf{Hypothesis Testing}: Appropriate parametric and non-parametric tests based on data characteristics
+    \item \textbf{Effect Size Calculation}: Cohen's d and Hedges' g for practical significance
+    \item \textbf{Multiple Comparison Correction}: {{ correction_method }} correction to control Type I error
+\end{itemize}
+
+% Results
+\section{Results}
+
+\subsection{Descriptive Statistics}
+
+Table~\ref{tab:descriptive} presents the descriptive statistics for key metrics.
+
+\begin{table}[H]
+\centering
+\caption{Descriptive Statistics of Key Metrics}
+\label{tab:descriptive}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Metric} & \textbf{Mean} & \textbf{Median} & \textbf{Std} & \textbf{Min} & \textbf{Max} \\
+\midrule
+{{ descriptive_stats_table }}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Distribution Analysis}
+
+{{ distribution_analysis }}
+
+% Include distribution plot if available
+{{ '{' }}% if distribution_plot_path %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth{{ '{' }}{{ '}' }}{{ '{' }}{{ distribution_plot_path }}{{ '}' }}
+\caption{Distribution of Key Metrics}
+\label{fig:distributions}
+\end{figure}
+{{ '{' }}% endif %}
+
+\subsection{Correlation Analysis}
+
+The correlation analysis revealed several significant relationships between metrics:
+
+{{ correlation_analysis }}
+
+% Include correlation heatmap if available
+{{ '{' }}% if correlation_plot_path %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth{{ '{' }}{{ '}' }}{{ '{' }}{{ correlation_plot_path }}{{ '}' }}
+\caption{Correlation Matrix of Performance Metrics}
+\label{fig:correlation}
+\end{figure}
+{{ '{' }}% endif %}
+
+\subsection{Group Comparisons}
+
+{{ '{' }}% if group_comparisons %}
+{{ group_comparisons }}
+
+% Include comparison plot if available
+{{ '{' }}% if comparison_plot_path %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth{{ '{' }}{{ '}' }}{{ '{' }}{{ comparison_plot_path }}{{ '}' }}
+\caption{Performance Comparison Across Groups}
+\label{fig:comparison}
+\end{figure}
+{{ '{' }}% endif %}
+{{ '{' }}% endif %}
+
+\subsection{Effect Sizes}
+
+Table~\ref{tab:effect_sizes} presents the effect sizes for key comparisons.
+
+\begin{table}[H]
+\centering
+\caption{Effect Sizes for Key Comparisons}
+\label{tab:effect_sizes}
+\begin{tabular}{lrrl}
+\toprule
+\textbf{Comparison} & \textbf{Cohen's d} & \textbf{95\% CI} & \textbf{Interpretation} \\
+\midrule
+{{ effect_sizes_table }}
+\bottomrule
+\end{tabular}
+\end{table}
+
+% Advanced Analysis
+\section{Advanced Analysis}
+
+\subsection{Principal Component Analysis}
+
+{{ '{' }}% if pca_analysis %}
+{{ pca_analysis }}
+
+% Include PCA plot if available
+{{ '{' }}% if pca_plot_path %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth{{ '{' }}{{ '}' }}{{ '{' }}{{ pca_plot_path }}{{ '}' }}
+\caption{Principal Component Analysis}
+\label{fig:pca}
+\end{figure}
+{{ '{' }}% endif %}
+{{ '{' }}% endif %}
+
+\subsection{Time Series Analysis}
+
+{{ '{' }}% if time_series_analysis %}
+{{ time_series_analysis }}
+
+% Include time series plot if available
+{{ '{' }}% if time_series_plot_path %}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth{{ '{' }}{{ '}' }}{{ '{' }}{{ time_series_plot_path }}{{ '}' }}
+\caption{Temporal Trends in Performance Metrics}
+\label{fig:timeseries}
+\end{figure}
+{{ '{' }}% endif %}
+{{ '{' }}% endif %}
+
+% Discussion
+\section{Discussion}
+
+\subsection{Key Findings}
+
+{{ key_findings }}
+
+\subsection{Performance Insights}
+
+{{ performance_insights }}
+
+\subsection{Statistical Considerations}
+
+{{ statistical_considerations }}
+
+% Conclusions
+\section{Conclusions}
+
+{{ conclusions }}
+
+% Recommendations
+\section{Recommendations}
+
+Based on the analysis results, we recommend:
+
+{{ recommendations }}
+
+% Appendices
+\appendix
+
+\section{Statistical Test Details}
+
+\subsection{Normality Tests}
+
+{{ normality_tests }}
+
+\subsection{Hypothesis Test Results}
+
+{{ hypothesis_tests }}
+
+\section{Additional Visualizations}
+
+{{ '{' }}% if additional_plots %}
+{{ additional_plots }}
+{{ '{' }}% endif %}
+
+\section{Technical Details}
+
+\subsection{Analysis Configuration}
+\begin{itemize}
+    \item \textbf{Significance Level}: $\alpha = {{ alpha }}$
+    \item \textbf{Correction Method}: {{ correction_method }}
+    \item \textbf{Bootstrap Iterations}: {{ bootstrap_iterations }}
+    \item \textbf{Random Seed}: {{ random_seed }}
+\end{itemize}
+
+\subsection{Software and Libraries}
+\begin{itemize}
+    \item Python {{ python_version }}
+    \item NumPy {{ numpy_version }}
+    \item SciPy {{ scipy_version }}
+    \item Scikit-learn {{ sklearn_version }}
+    \item Statsmodels {{ statsmodels_version }}
+\end{itemize}
+
+% References
+\bibliographystyle{unsrt}
+\begin{thebibliography}{99}
+
+\bibitem{tishby2000information}
+N. Tishby, F. C. Pereira, and W. Bialek,
+``The information bottleneck method,''
+\textit{Proc. 37th Annual Allerton Conference on Communication, Control and Computing},
+pp. 368--377, 2000.
+
+\bibitem{tishby2015deep}
+N. Tishby and N. Zaslavsky,
+``Deep learning and the information bottleneck principle,''
+\textit{IEEE Information Theory Workshop (ITW)},
+pp. 1--5, 2015.
+
+\bibitem{ji2024phase}
+H. Ji, Y. Li, and S. Zhang,
+``Phase transitions in neural network adaptation: Elasticity, rigidity, and catastrophic forgetting,''
+\textit{arXiv preprint arXiv:2401.00000}, 2024.
+
+\bibitem{kirkpatrick2017overcoming}
+J. Kirkpatrick et al.,
+``Overcoming catastrophic forgetting in neural networks,''
+\textit{Proceedings of the National Academy of Sciences},
+vol. 114, no. 13, pp. 3521--3526, 2017.
+
+\bibitem{alemi2016deep}
+A. A. Alemi, I. Fischer, J. V. Dillon, and K. Murphy,
+``Deep variational information bottleneck,''
+\textit{International Conference on Learning Representations (ICLR)}, 2017.
+
+\bibitem{achille2018information}
+A. Achille and S. Soatto,
+``Information dropout: Learning optimal representations through noisy computation,''
+\textit{IEEE Transactions on Pattern Analysis and Machine Intelligence},
+vol. 40, no. 12, pp. 2897--2905, 2018.
+
+\bibitem{lyapunov1992stability}
+A. M. Lyapunov,
+``The general problem of the stability of motion,''
+\textit{International Journal of Control},
+vol. 55, no. 3, pp. 531--534, 1992.
+
+\bibitem{rissanen1978modeling}
+J. Rissanen,
+``Modeling by shortest data description,''
+\textit{Automatica},
+vol. 14, no. 5, pp. 465--471, 1978.
+
+{{ '{' }}% if references %}
+% Additional custom references
+{{ references }}
+{{ '{' }}% endif %}
+
+\end{thebibliography}
+
+\end{document}

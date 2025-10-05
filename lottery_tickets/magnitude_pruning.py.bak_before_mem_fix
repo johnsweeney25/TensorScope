@@ -1,0 +1,377 @@
+"""
+Magnitude-based Pruning Methods
+================================
+Memory-efficient implementations of magnitude pruning.
+"""
+
+import torch
+import torch.nn as nn
+from typing import Dict, Any, List, Optional, Tuple
+import numpy as np
+
+from .utils import apply_mask, compute_sparsity, compute_histogram_quantile
+
+
+def compute_pruning_robustness(
+    model: nn.Module,
+    batch: Dict[str, torch.Tensor],
+    sparsity_levels: List[float] = None,
+    use_histogram_quantiles: bool = True,
+    histogram_bins: int = 1000,
+    return_masks: bool = False
+) -> Dict[str, Any]:
+    """
+    Test model robustness to magnitude-based pruning.
+
+    Memory-efficient version using histogram-based quantiles.
+
+    Args:
+        model: Model to test
+        batch: Evaluation batch
+        sparsity_levels: Sparsity levels to test (default: [0.1, 0.3, 0.5, 0.7, 0.9])
+        use_histogram_quantiles: Use memory-efficient histogram method
+        histogram_bins: Number of histogram bins
+        return_masks: Whether to return pruning masks
+
+    Returns:
+        Dictionary with pruning robustness metrics
+
+    Memory usage: O(histogram_bins) instead of O(num_parameters)
+    """
+    if sparsity_levels is None:
+        sparsity_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
+
+    # Auto-wrap model if needed for compatibility
+    from .utils import create_model_wrapper
+    import torch
+    if not hasattr(model, 'forward'):
+        model = create_model_wrapper(model)
+    elif not hasattr(model.forward.__self__, 'model'):
+        # Check if it's a simple model that needs wrapping
+        try:
+            # Test if model can handle dict input
+            test_input = {'input_ids': torch.randn(1, 10)}
+            _ = model(**test_input)
+        except (TypeError, RuntimeError):
+            # Model can't handle dict input, wrap it
+            model = create_model_wrapper(model)
+
+    model.eval()
+    device = next(model.parameters()).device
+    batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+
+    # Get baseline performance
+    with torch.no_grad():
+        outputs = model(**batch)
+        baseline_loss = outputs.loss.item()
+        baseline_logits = outputs.logits.detach().cpu() if hasattr(outputs, 'logits') else None
+
+    results = {
+        'baseline_loss': baseline_loss,
+        'sparsity_curves': {},
+        'robustness_metrics': {}
+    }
+
+    all_masks = {} if return_masks else None
+
+    for sparsity in sparsity_levels:
+        # Create pruning mask
+        mask = create_magnitude_mask(
+            model,
+            sparsity,
+            use_histogram=use_histogram_quantiles,
+            histogram_bins=histogram_bins
+        )
+
+        # Apply mask
+        original_weights = {}
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if name in mask:
+                    original_weights[name] = param.data.clone()
+                    param.data.mul_(mask[name].to(param.device))
+
+        # Evaluate pruned model
+        with torch.no_grad():
+            outputs = model(**batch)
+            pruned_loss = outputs.loss.item()
+
+            logit_similarity = None
+            if baseline_logits is not None and hasattr(outputs, 'logits'):
+                logit_similarity = torch.nn.functional.cosine_similarity(
+                    outputs.logits.detach().cpu().flatten(),
+                    baseline_logits.flatten(),
+                    dim=0
+                ).item()
+
+        # Compute metrics
+        performance_retention = baseline_loss / max(pruned_loss, 1e-8)
+        loss_increase = (pruned_loss - baseline_loss) / max(baseline_loss, 1e-8)
+
+        # Store results
+        results['sparsity_curves'][f'sparsity_{int(sparsity*100)}'] = {
+            'sparsity': sparsity,
+            'actual_sparsity': compute_sparsity(mask),
+            'loss': pruned_loss,
+            'loss_increase': loss_increase,
+            'performance_retention': performance_retention,
+            'logit_similarity': logit_similarity
+        }
+
+        # Store mask if requested
+        if return_masks:
+            all_masks[f'sparsity_{int(sparsity*100)}'] = {k: v.cpu() for k, v in mask.items()}
+
+        # Restore original weights
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if name in original_weights:
+                    param.data.copy_(original_weights[name])
+
+        # Clean up
+        del original_weights
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # Compute robustness metrics
+    results['robustness_metrics'] = _compute_robustness_metrics(results['sparsity_curves'])
+
+    if return_masks:
+        results['masks'] = all_masks
+
+    return results
+
+
+def compute_layerwise_magnitude_ticket(
+    model: nn.Module,
+    target_sparsity: float = 0.9,
+    use_global_ranking: bool = True,
+    layer_importance_weights: Optional[Dict[str, float]] = None,
+    max_params_per_chunk: int = 100_000_000
+) -> Dict[str, Any]:
+    """
+    Find lottery ticket using magnitude pruning.
+
+    Supports both global ranking and layer-wise importance weighting.
+
+    Args:
+        model: Model to prune
+        target_sparsity: Target sparsity level
+        use_global_ranking: Use global magnitude ranking across all layers
+        layer_importance_weights: Optional layer importance weights
+        max_params_per_chunk: Maximum parameters to process at once
+
+    Returns:
+        Dictionary with masks and sparsity statistics
+    """
+    if use_global_ranking:
+        return _global_magnitude_pruning(model, target_sparsity, max_params_per_chunk)
+    else:
+        return _layerwise_magnitude_pruning(model, target_sparsity, layer_importance_weights)
+
+
+def create_magnitude_mask(
+    model: nn.Module,
+    sparsity: float,
+    use_histogram: bool = True,
+    histogram_bins: int = 1000,
+    only_weights: bool = True
+) -> Dict[str, torch.Tensor]:
+    """
+    Create pruning mask based on magnitude.
+
+    Args:
+        model: Model to create mask for
+        sparsity: Fraction of parameters to prune
+        use_histogram: Use memory-efficient histogram method
+        histogram_bins: Number of histogram bins
+        only_weights: Only prune weight parameters (not biases)
+
+    Returns:
+        Dictionary mapping parameter names to binary masks
+    """
+    masks = {}
+
+    for name, param in model.named_parameters():
+        if only_weights and 'weight' not in name:
+            continue
+
+        if len(param.shape) < 2:  # Skip 1D parameters
+            continue
+
+        with torch.no_grad():
+            if use_histogram:
+                threshold = compute_histogram_quantile(
+                    param.abs(),
+                    sparsity,
+                    bins=histogram_bins
+                )
+            else:
+                # Direct quantile (can be memory intensive)
+                if param.numel() > 10_000_000:
+                    # Sample for large tensors
+                    sample_size = 1_000_000
+                    indices = torch.randperm(param.numel())[:sample_size]
+                    sampled = param.flatten()[indices].abs()
+                    threshold = torch.quantile(sampled, sparsity).item()
+                else:
+                    threshold = torch.quantile(param.abs(), sparsity).item()
+
+            masks[name] = param.abs() > threshold
+
+    return masks
+
+
+def _global_magnitude_pruning(
+    model: nn.Module,
+    target_sparsity: float,
+    max_params_per_chunk: int
+) -> Dict[str, Any]:
+    """
+    Global magnitude pruning across all layers.
+
+    More theoretically sound than uniform layer-wise pruning.
+    """
+    # Collect all weight magnitudes
+    all_magnitudes = []
+    param_info = []
+
+    for name, param in model.named_parameters():
+        if 'weight' in name and len(param.shape) >= 2:
+            flat_weights = param.abs().flatten()
+
+            # Sample if too large
+            if flat_weights.numel() > max_params_per_chunk:
+                indices = torch.randperm(flat_weights.numel())[:max_params_per_chunk]
+                flat_weights = flat_weights[indices]
+
+            all_magnitudes.append(flat_weights)
+            param_info.append({
+                'name': name,
+                'shape': param.shape,
+                'numel': param.numel()
+            })
+
+    # Concatenate and find global threshold
+    if all_magnitudes:
+        global_magnitudes = torch.cat(all_magnitudes)
+        threshold = torch.quantile(global_magnitudes, target_sparsity).item()
+
+        # Clean up large tensor
+        del global_magnitudes
+        del all_magnitudes
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    else:
+        threshold = 0.0
+
+    # Create masks using global threshold
+    masks = {}
+    actual_sparsities = {}
+
+    for info in param_info:
+        name = info['name']
+        param = dict(model.named_parameters())[name]
+
+        with torch.no_grad():
+            mask = param.abs() > threshold
+            masks[name] = mask
+            actual_sparsities[name] = (mask == 0).float().mean().item()
+
+    # Compute overall statistics
+    overall_sparsity = compute_sparsity(masks)
+
+    return {
+        'masks': masks,
+        'layer_sparsities': actual_sparsities,
+        'overall_sparsity': overall_sparsity,
+        'method': 'global_ranking',
+        'threshold': threshold
+    }
+
+
+def _layerwise_magnitude_pruning(
+    model: nn.Module,
+    target_sparsity: float,
+    layer_importance_weights: Optional[Dict[str, float]]
+) -> Dict[str, Any]:
+    """
+    Layer-wise magnitude pruning with importance weighting.
+    """
+    if layer_importance_weights is None:
+        # Uniform importance if not provided
+        layer_importance_weights = {}
+
+    masks = {}
+    actual_sparsities = {}
+
+    for name, param in model.named_parameters():
+        if 'weight' in name and len(param.shape) >= 2:
+            # Adjust sparsity based on layer importance
+            importance = layer_importance_weights.get(name, 1.0)
+
+            # Higher importance = lower sparsity
+            adjusted_sparsity = target_sparsity * (2.0 - importance)
+            adjusted_sparsity = np.clip(adjusted_sparsity, 0.0, 0.99)
+
+            # Compute threshold for this layer
+            with torch.no_grad():
+                threshold = compute_histogram_quantile(
+                    param.abs(),
+                    adjusted_sparsity
+                )
+
+                # Create mask
+                mask = param.abs() > threshold
+                masks[name] = mask
+                actual_sparsities[name] = (mask == 0).float().mean().item()
+
+    overall_sparsity = compute_sparsity(masks)
+
+    return {
+        'masks': masks,
+        'layer_sparsities': actual_sparsities,
+        'overall_sparsity': overall_sparsity,
+        'method': 'importance_weighted'
+    }
+
+
+def _compute_robustness_metrics(sparsity_curves: Dict) -> Dict[str, float]:
+    """Compute robustness summary metrics."""
+    metrics = {}
+
+    # Find best performance retention
+    best_retention = 0
+    optimal_sparsity = 0
+
+    for key, curve in sparsity_curves.items():
+        if curve['performance_retention'] > best_retention:
+            best_retention = curve['performance_retention']
+            optimal_sparsity = curve['sparsity']
+
+    metrics['winning_ticket_score'] = best_retention
+    metrics['optimal_sparsity'] = optimal_sparsity
+
+    # Compute area under performance curve
+    if len(sparsity_curves) > 1:
+        sparsities = [v['sparsity'] for v in sparsity_curves.values()]
+        retentions = [v['performance_retention'] for v in sparsity_curves.values()]
+
+        # Sort by sparsity
+        sorted_pairs = sorted(zip(sparsities, retentions))
+        sparsities, retentions = zip(*sorted_pairs)
+
+        # Trapezoidal integration
+        auc = np.trapz(retentions, sparsities)
+        metrics['pruning_auc'] = auc
+
+    # Find critical sparsity (50% performance drop)
+    critical_sparsity = None
+    for key, curve in sorted(sparsity_curves.items()):
+        if curve['performance_retention'] < 0.5:
+            critical_sparsity = curve['sparsity']
+            break
+
+    metrics['critical_sparsity'] = critical_sparsity or 1.0
+
+    return metrics

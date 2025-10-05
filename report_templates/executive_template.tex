@@ -1,0 +1,76 @@
+\documentclass[12pt,letterpaper]{report}
+\usepackage[margin=1.25in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{subcaption}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage{titlesec}
+
+% Executive report styling
+\titleformat{\chapter}[display]
+{\normalfont\huge\bfseries}{\chaptertitlename\ \thechapter}{20pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{-50pt}{40pt}
+
+% Header and footer
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Executive Report}
+\lhead{Model Analysis Framework}
+\rfoot{Page \thepage\ of \pageref{LastPage}}
+\lfoot{\today}
+
+% Colors for emphasis
+\definecolor{darkblue}{RGB}{0,0,139}
+\definecolor{darkgreen}{RGB}{0,100,0}
+\definecolor{darkred}{RGB}{139,0,0}
+
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Huge\bfseries Statistical Analysis Report\par}
+    \vspace{1cm}
+    {\Large Executive Summary\par}
+    \vspace{2cm}
+
+    {\Large\itshape Unified Model Analysis Framework\par}
+    \vspace{1.5cm}
+
+    \begin{figure}[h]
+        \centering
+        \includegraphics[width=0.3\textwidth]{logo.png}
+    \end{figure}
+
+    \vfill
+
+    {\large Generated: \today\par}
+    \vspace{1cm}
+
+    \begin{abstract}
+        \noindent
+        This executive report provides key insights from the comprehensive statistical analysis of model merging operations. Critical findings include Fisher information overlap analysis, task interference risk assessment, and actionable recommendations for model deployment strategies.
+    \end{abstract}
+
+    \vspace{2cm}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+{{ CONTENT }}
+
+\chapter{Contact Information}
+For questions about this report or the analysis methodology, please contact:
+\begin{itemize}
+    \item Technical Team: \href{mailto:tech@analysis.ai}{tech@analysis.ai}
+    \item Project Management: \href{mailto:pm@analysis.ai}{pm@analysis.ai}
+\end{itemize}
+
+\end{document}

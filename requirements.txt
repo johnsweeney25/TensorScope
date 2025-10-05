@@ -1,0 +1,50 @@
+# Core Deep Learning
+torch>=2.0.0
+numpy>=1.24.0,<2.0.0  # Updated for better numerical stability
+
+# Transformers and NLP
+transformers>=4.30.0
+datasets>=2.0.0
+tokenizers>=0.13.0  # Fast tokenizers for transformers
+
+# GPU Optimization (Optional but recommended for large models)
+# accelerate>=0.20.0  # For efficient multi-GPU and mixed precision
+# bitsandbytes>=0.41.0  # For 8-bit and 4-bit quantization
+# safetensors>=0.3.1  # For safe and fast model loading
+
+# Scientific Computing
+scipy>=1.11.0  # For linalg.cho_solve, SVD, and numerical algorithms
+pandas>=1.3.0
+
+# Statistical Analysis
+statsmodels>=0.13.0  # For statistical tests and corrections
+ruptures>=1.1.0  # For change point detection (optional but recommended)
+
+# Machine Learning
+scikit-learn>=1.3.0  # For Ridge regression, RidgeCV, metrics, PCA
+
+# Visualization
+matplotlib>=3.3.0
+seaborn>=0.11.0
+
+# Attribution and Analysis (Optional)
+captum>=0.6.0  # For integrated gradients and attribution methods
+bertviz>=1.4.0  # For attention visualization
+
+# Progress Bars
+tqdm>=4.62.0  # For progress bars during analysis
+
+# Testing and Development
+coverage>=6.0  # For test coverage reporting
+pytest>=7.0.0  # For running tests (optional, we use unittest)
+
+# Development Tools (Optional)
+ipython>=7.0.0  # For interactive development
+jupyter>=1.0.0  # For notebook development
+
+# Optional: For PyTorch 2.0+ users (functorch is built-in)
+# functorch  # Now included in torch.func for PyTorch >= 2.0
+
+# Additional dependencies found in codebase
+psutil>=5.9.0  # For memory management and monitoring
+pyyaml>=6.0  # For YAML configuration files

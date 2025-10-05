@@ -1,0 +1,307 @@
+"""
+Early Bird Ticket Detection
+============================
+Find winning lottery tickets early in training.
+"""
+
+import torch
+import torch.nn as nn
+from typing import Dict, Any, List, Optional, Callable
+import numpy as np
+
+from .magnitude_pruning import create_magnitude_mask
+from .utils import compute_sparsity
+
+
+def compute_early_bird_tickets(
+    model: nn.Module,
+    dataloader,
+    trainer_fn: Optional[Callable] = None,
+    max_epochs: int = 50,
+    check_interval: int = 5,
+    target_sparsity: float = 0.5,
+    convergence_threshold: float = 0.95,
+    stability_window: int = 3,
+    use_magnitude_ranking: bool = True
+) -> Dict[str, Any]:
+    """
+    Early-Bird Ticket Detection using magnitude ranking correlation.
+
+    Finds winning tickets early by detecting when important weights stabilize.
+
+    Args:
+        model: Model to train and find early-bird tickets
+        dataloader: Training data
+        trainer_fn: Optional training function (epochs=1 each call)
+        max_epochs: Maximum epochs to train
+        check_interval: Epochs between stability checks
+        target_sparsity: Sparsity level for masks
+        convergence_threshold: Correlation threshold for convergence (0.95 = 95%)
+        stability_window: Consecutive stable checks for convergence
+        use_magnitude_ranking: Use magnitude ranking vs binary masks
+
+    Returns:
+        Dictionary with early-bird detection results
+    """
+    device = next(model.parameters()).device
+
+    results = {
+        'method': 'magnitude_ranking' if use_magnitude_ranking else 'binary_mask',
+        'target_sparsity': target_sparsity,
+        'convergence_threshold': convergence_threshold,
+        'checkpoints': [],
+        'converged': False,
+        'convergence_epoch': None
+    }
+
+    stability_counter = 0
+    previous_rankings = None
+
+    for epoch in range(0, max_epochs, check_interval):
+        # Train for check_interval epochs
+        if trainer_fn is not None:
+            trainer_fn(model, dataloader, epochs=check_interval)
+        else:
+            # Simple default training
+            _default_train(model, dataloader, epochs=check_interval)
+
+        # Get current importance rankings
+        if use_magnitude_ranking:
+            current_rankings = _get_magnitude_rankings(model, target_sparsity)
+        else:
+            current_mask = create_magnitude_mask(model, target_sparsity)
+            current_rankings = _mask_to_rankings(current_mask)
+
+        # Check convergence
+        if previous_rankings is not None:
+            correlation = _compute_ranking_correlation(
+                previous_rankings,
+                current_rankings
+            )
+
+            checkpoint = {
+                'epoch': epoch + check_interval,
+                'correlation': correlation,
+                'stable': correlation >= convergence_threshold
+            }
+            results['checkpoints'].append(checkpoint)
+
+            if correlation >= convergence_threshold:
+                stability_counter += 1
+                if stability_counter >= stability_window:
+                    results['converged'] = True
+                    results['convergence_epoch'] = epoch + check_interval
+                    results['final_rankings'] = current_rankings
+                    results['final_mask'] = create_magnitude_mask(model, target_sparsity)
+                    break
+            else:
+                stability_counter = 0
+
+        previous_rankings = current_rankings
+
+    # If didn't converge, still return final state
+    if not results['converged']:
+        results['final_rankings'] = current_rankings
+        results['final_mask'] = create_magnitude_mask(model, target_sparsity)
+
+    return results
+
+
+def detect_early_bird_convergence(
+    model: nn.Module,
+    previous_state: Optional[Dict[str, torch.Tensor]] = None,
+    target_sparsity: float = 0.5,
+    method: str = 'spearman'
+) -> Dict[str, Any]:
+    """
+    Check if early bird tickets have converged.
+
+    Single-step convergence check for integration into training loops.
+
+    Args:
+        model: Current model state
+        previous_state: Previous model state (parameter dict)
+        target_sparsity: Sparsity level for comparison
+        method: 'spearman' or 'kendall' correlation
+
+    Returns:
+        Convergence statistics
+    """
+    if previous_state is None:
+        # First call - just return current state
+        current_state = {name: param.data.clone()
+                        for name, param in model.named_parameters()
+                        if 'weight' in name}
+        return {
+            'converged': False,
+            'correlation': 0.0,
+            'current_state': current_state,
+            'method': method
+        }
+
+    # Get current rankings
+    current_rankings = _get_magnitude_rankings(model, target_sparsity)
+
+    # Get previous rankings from saved state
+    prev_model = _create_model_from_state(model, previous_state)
+    previous_rankings = _get_magnitude_rankings(prev_model, target_sparsity)
+
+    # Compute correlation
+    if method == 'spearman':
+        correlation = _compute_ranking_correlation(previous_rankings, current_rankings)
+    elif method == 'kendall':
+        correlation = _compute_kendall_tau(previous_rankings, current_rankings)
+    else:
+        raise ValueError(f"Unknown correlation method: {method}")
+
+    # Update state
+    current_state = {name: param.data.clone()
+                    for name, param in model.named_parameters()
+                    if 'weight' in name}
+
+    return {
+        'converged': correlation > 0.95,
+        'correlation': correlation,
+        'current_state': current_state,
+        'method': method
+    }
+
+
+def _get_magnitude_rankings(
+    model: nn.Module,
+    sparsity: float
+) -> Dict[str, torch.Tensor]:
+    """Get magnitude-based rankings for each layer."""
+    rankings = {}
+
+    for name, param in model.named_parameters():
+        if 'weight' in name and len(param.shape) >= 2:
+            with torch.no_grad():
+                # For memory efficiency on large layers
+                if param.numel() > 10_000_000:
+                    # Sample 1M parameters
+                    indices = torch.randperm(param.numel())[:1_000_000]
+                    sampled = param.flatten()[indices].abs()
+                    rankings[name] = sampled.argsort().cpu()
+                else:
+                    rankings[name] = param.abs().flatten().argsort().cpu()
+
+    return rankings
+
+
+def _mask_to_rankings(mask: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Convert binary mask to rankings for comparison."""
+    rankings = {}
+    for name, mask_tensor in mask.items():
+        # Treat mask as importance (1 = important, 0 = not)
+        rankings[name] = mask_tensor.flatten().float().cpu()
+    return rankings
+
+
+def _compute_ranking_correlation(
+    rankings1: Dict[str, torch.Tensor],
+    rankings2: Dict[str, torch.Tensor]
+) -> float:
+    """Compute average Spearman correlation between rankings."""
+    correlations = []
+
+    for name in rankings1:
+        if name in rankings2:
+            rank1 = rankings1[name].float()
+            rank2 = rankings2[name].float()
+
+            if len(rank1) != len(rank2):
+                continue
+
+            # Compute Spearman correlation
+            n = len(rank1)
+            if n > 1:
+                try:
+                    from scipy.stats import spearmanr
+                    corr, _ = spearmanr(rank1.numpy(), rank2.numpy())
+                    correlations.append(corr)
+                except ImportError:
+                    # Fallback: Pearson correlation as approximation
+                    mean1 = rank1.mean()
+                    mean2 = rank2.mean()
+
+                    std1 = rank1.std()
+                    std2 = rank2.std()
+
+                    if std1 > 0 and std2 > 0:
+                        cov = ((rank1 - mean1) * (rank2 - mean2)).mean()
+                        corr = cov / (std1 * std2)
+                        correlations.append(corr.item())
+
+    return np.mean(correlations) if correlations else 0.0
+
+
+def _compute_kendall_tau(
+    rankings1: Dict[str, torch.Tensor],
+    rankings2: Dict[str, torch.Tensor]
+) -> float:
+    """Compute Kendall's tau correlation (more robust but slower)."""
+    correlations = []
+
+    for name in rankings1:
+        if name in rankings2:
+            rank1 = rankings1[name]
+            rank2 = rankings2[name]
+
+            if len(rank1) != len(rank2):
+                continue
+
+            try:
+                from scipy.stats import kendalltau
+                tau, _ = kendalltau(rank1.numpy(), rank2.numpy())
+                correlations.append(tau)
+            except ImportError:
+                # Use Spearman as fallback
+                return _compute_ranking_correlation(rankings1, rankings2)
+
+    return np.mean(correlations) if correlations else 0.0
+
+
+def _default_train(
+    model: nn.Module,
+    dataloader,
+    epochs: int = 1,
+    lr: float = 1e-4
+):
+    """Simple default training function."""
+    model.train()
+    device = next(model.parameters()).device
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+    for _ in range(epochs):
+        for batch in dataloader:
+            # Prepare batch
+            if isinstance(batch, dict):
+                batch = {k: v.to(device) if torch.is_tensor(v) else v
+                        for k, v in batch.items()}
+            else:
+                batch = batch.to(device)
+
+            # Forward pass
+            optimizer.zero_grad()
+            outputs = model(**batch) if isinstance(batch, dict) else model(batch)
+            loss = outputs.loss if hasattr(outputs, 'loss') else outputs.mean()
+
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+
+
+def _create_model_from_state(
+    model_template: nn.Module,
+    state: Dict[str, torch.Tensor]
+) -> nn.Module:
+    """Create model with parameters from saved state."""
+    import copy
+    new_model = copy.deepcopy(model_template)
+
+    for name, param in new_model.named_parameters():
+        if name in state:
+            param.data.copy_(state[name])
+
+    return new_model

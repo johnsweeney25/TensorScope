@@ -1,0 +1,16 @@
+{
+  "information_flow": {
+    "error": "'list' object is not an iterator",
+    "traceback": "Traceback (most recent call last):\n  File \"/Users/john/ICLR 2026 proj/pythonProject/comprehensive_runner_complete.py\", line 932, in _run_single_metric\n    result = func(model, batch)\n             ^^^^^^^^^^^^^^^^^^\n  File \"/Users/john/ICLR 2026 proj/pythonProject/InformationTheoryMetrics.py\", line 314, in compute_information_flow\n    input_batch = self._to_device(model, input_batch)\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/john/ICLR 2026 proj/pythonProject/InformationTheoryMetrics.py\", line 126, in _to_device\n    device = next(model.parameters()).device\n             ^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: 'list' object is not an iterator\n",
+    "module": "information",
+    "function": "compute_information_flow",
+    "timestamp": "2025-09-16T09:34:46.893396"
+  },
+  "attention_entropy": {
+    "error": "'list' object is not an iterator",
+    "traceback": "Traceback (most recent call last):\n  File \"/Users/john/ICLR 2026 proj/pythonProject/comprehensive_runner_complete.py\", line 932, in _run_single_metric\n    result = func(model, batch)\n             ^^^^^^^^^^^^^^^^^^\n  File \"/Users/john/ICLR 2026 proj/pythonProject/BombshellMetrics.py\", line 202, in compute_attention_entropy\n    batch = self._to_device(model, batch)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/john/ICLR 2026 proj/pythonProject/BombshellMetrics.py\", line 80, in _to_device\n    device = next(model.parameters()).device\n             ^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: 'list' object is not an iterator\n",
+    "module": "bombshell",
+    "function": "compute_attention_entropy",
+    "timestamp": "2025-09-16T09:34:46.894342"
+  }
+}
