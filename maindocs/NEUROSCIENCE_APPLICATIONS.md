@@ -1,21 +1,24 @@
 # TensorScope for Neuroscience & Cognitive Science
 
-**The Problem:** Computational neuroscience labs typically analyze neural recordings and model internals with separate tools, making it hard to systematically compare biological and artificial neural networks. TensorScope provides a unified framework to compute model internals (Fisher information, geometry, circuits) in the same pipeline you use for neural analysis (RDMs, regression, manifolds).
+**The Problem:** Computational neuroscience labs typically analyze neural recordings and model internals with separate tools. TensorScope provides model analysis metrics (Fisher information, geometry, circuits, superposition) that can be compared with neural data using your existing analysis pipeline.
+
+**What's Built-In vs. What You Implement:**
+- ✅ **TensorScope provides:** Model metrics (CKA, superposition, geometry, circuits, Fisher)
+- 🔧 **You implement:** Comparison with your neural data (RDMs, regression, alignment)
 
 ---
 
 ## Table of Contents
 - [Quick Start for Neuroscientists](#quick-start-for-neuroscientists)
-- [Research Questions You Can Answer](#research-questions-you-can-answer)
+- [What TensorScope Actually Provides](#what-tensorscope-actually-provides)
+- [Research Questions You Can Investigate](#research-questions-you-can-investigate)
   - [1. Representational Alignment](#1-representational-alignment)
   - [2. Neural Predictivity](#2-neural-predictivity)
   - [3. Polysemanticity & Superposition](#3-polysemanticity--superposition)
   - [4. Manifold Geometry](#4-manifold-geometry)
   - [5. Circuit Motifs](#5-circuit-motifs)
 - [Example Workflows](#example-workflows)
-- [Relevant Metrics](#relevant-metrics)
 - [Integration with Neuroscience Tools](#integration-with-neuroscience-tools)
-- [Publications Using TensorScope for Neuro-AI](#publications-using-tensorscope-for-neuro-ai)
 
 ---
 
@@ -28,53 +31,120 @@ from unified_model_analysis import UnifiedModelAnalyzer
 analyzer = UnifiedModelAnalyzer()
 results = analyzer.analyze_models([your_vision_model])
 
-# Get representations for comparison with neural data
-cka_similarity = results.get('cka_similarity')          # Compare layer representations
-effective_rank = results.get('effective_rank')          # Dimensionality per layer
-superposition = results.get('superposition_regime')     # Feature interference
-geometry = results.get('embedding_singularities')       # Manifold violations
-attention_patterns = results.get('attention_flow')      # Circuit structure
+# Get model metrics (built-in)
+cka_similarity = results.get('cka_similarity')          # ✅ Layer-wise CKA
+effective_rank = results.get('effective_rank')          # ✅ Dimensionality
+superposition = results.get('superposition_regime')     # ✅ Feature interference
+geometry = results.get('embedding_singularities')       # ✅ Manifold violations
+circuits = results.get('qkov_pairing')                  # ✅ Attention circuits
 
-# Export for analysis in your neuroscience pipeline
+# Export for your neural analysis pipeline
 results.save_report("model_analysis.json")
-```
 
-**What you get:**
-- Layer-wise representational structure (CKA, RSA, effective rank)
-- Geometric properties (singularities, curvature, manifold violations)
-- Circuit analysis (attention patterns, induction heads, QK-OV pairing)
-- Feature organization (superposition, polysemanticity, sparsity)
-- All metrics computed under identical conditions (same batch, seed, device)
+# Now use YOUR tools to compare with neural data
+# (sklearn, Brain-Score, RSA Toolbox, etc.)
+```
 
 ---
 
-## Research Questions You Can Answer
+## What TensorScope Actually Provides
+
+### ✅ **Built-In Model Metrics:**
+- **CKA similarity**: Layer-wise representational similarity (within model)
+- **Superposition metrics**: Feature interference, sparsity, polysemanticity
+- **Manifold geometry**: Singularities, curvature, effective rank
+- **Circuit analysis**: QK-OV pairing, induction heads, attention flow
+- **Fisher information**: Parameter importance, task overlap
+
+### 🔧 **What You Need to Implement:**
+- **Neural RDM comparison**: Use your neural data + scipy/sklearn
+- **Ridge/PLS regression**: Use sklearn on extracted features
+- **Brain-Score integration**: Use TensorScope outputs as inputs
+- **RSA Toolbox export**: Convert TensorScope metrics to RSA format
+- **Alignment scoring**: Compare model metrics to your neural benchmarks
+
+**TensorScope is a model analysis tool, not a neuroscience analysis tool.** It provides the model half of the comparison; you provide the neural data half.
+
+---
+
+## Research Questions You Can Investigate
 
 ### 1. Representational Alignment
 
 **Question:** Does your model's representational geometry match neural recordings?
 
-**What TensorScope provides:**
-- **CKA (Centered Kernel Alignment)**: Compare layer-wise representations to neural RDMs
-- **RSA (Representational Similarity Analysis)**: Correlation-based similarity between model and neural representational dissimilarity matrices
-- **Trajectory tracking**: Analyze how alignment evolves across training checkpoints
+**What TensorScope provides (built-in):**
+- ✅ `compute_cka_similarity`: Layer-wise CKA within model
+- ✅ `compute_block_cka_gap`: Block-wise representation similarity
+- ✅ `compute_effective_rank`: Dimensionality per layer
+
+**What you implement:**
+- 🔧 Load your neural RDMs
+- 🔧 Compute alignment scores (e.g., Spearman correlation)
+- 🔧 Track alignment across training checkpoints
 
 **Example workflow:**
 ```python
-# Compute model representations
+# Step 1: Get model representations (TensorScope)
 results = analyzer.analyze_models([model])
-model_rdm = results.get('cka_similarity')
+model_cka = results.get('cka_similarity')  # Dict of layer similarities
 
-# Compare to neural RDM (your data)
+# Step 2: Compare to neural data (YOUR CODE)
 import numpy as np
 from scipy.stats import spearmanr
 
-neural_rdm = load_your_neural_rdm()  # Your neural recordings
+# Load your neural RDM
+neural_rdm = np.load('your_neural_rdm.npy')  # Your data
 
-# Find best-matching layer
+# Extract model layer representations
+# NOTE: TensorScope doesn't provide direct layer activations export
+# You'll need to extract them yourself using model hooks
+from torch.nn import functional as F
+
+def get_layer_activations(model, batch):
+    """Helper function YOU implement"""
+    activations = {}
+    hooks = []
+    
+    def hook_fn(name):
+        def hook(module, input, output):
+            activations[name] = output.detach()
+        return hook
+    
+    # Register hooks for layers you care about
+    for name, module in model.named_modules():
+        if 'layer' in name:  # Adjust for your architecture
+            hooks.append(module.register_forward_hook(hook_fn(name)))
+    
+    # Forward pass
+    with torch.no_grad():
+        _ = model(**batch)
+    
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
+    
+    return activations
+
+# Get activations
+layer_acts = get_layer_activations(model, batch)
+
+# Compute RDM for each layer
+from scipy.spatial.distance import pdist, squareform
+
+layer_rdms = {}
+for layer_name, acts in layer_acts.items():
+    # Flatten to [samples x features]
+    acts_flat = acts.reshape(acts.shape[0], -1).cpu().numpy()
+    # Compute pairwise distances
+    distances = pdist(acts_flat, metric='correlation')
+    rdm = squareform(distances)
+    layer_rdms[layer_name] = rdm
+
+# Compare to neural RDM
 alignment_scores = {}
-for layer_name, layer_rdm in model_rdm.items():
-    rho, p = spearmanr(layer_rdm.flatten(), neural_rdm.flatten())
+for layer_name, model_rdm in layer_rdms.items():
+    rho, p = spearmanr(model_rdm.flatten(), neural_rdm.flatten())
     alignment_scores[layer_name] = {'rho': rho, 'p': p}
 
 best_layer = max(alignment_scores, key=lambda k: alignment_scores[k]['rho'])
@@ -83,16 +153,28 @@ print(f"Best neural alignment: {best_layer} (ρ={alignment_scores[best_layer]['r
 
 **Track across training:**
 ```python
-# Analyze checkpoints
+# Analyze multiple checkpoints
 checkpoints = ['ckpt_1k.pt', 'ckpt_5k.pt', 'ckpt_10k.pt', 'final.pt']
-results = analyzer.analyze_models(checkpoints)
 
-# See when model becomes "brain-like"
-alignment_trajectory = results.get('cka_trajectory')
-# Plot: alignment_score vs training_step
+alignment_over_time = []
+for ckpt_path in checkpoints:
+    model = load_model(ckpt_path)  # Your loading function
+    layer_acts = get_layer_activations(model, batch)
+    
+    # Compute alignment (your code from above)
+    alignment = compute_alignment_to_neural_rdm(layer_acts, neural_rdm)
+    alignment_over_time.append(alignment)
+
+# Plot trajectory
+import matplotlib.pyplot as plt
+plt.plot([1000, 5000, 10000, 100000], alignment_over_time)
+plt.xlabel('Training step')
+plt.ylabel('Neural alignment (Spearman ρ)')
+plt.title('When does model become brain-like?')
+plt.savefig('alignment_trajectory.png')
 ```
 
-**Why this matters:** Identifies which layers and training stages produce representations most similar to biological neural networks. Informs architecture design and training procedures to maximize brain-likeness.
+**Why this matters:** Identifies which layers and training stages produce representations most similar to biological neural networks.
 
 ---
 
@@ -100,58 +182,58 @@ alignment_trajectory = results.get('cka_trajectory')
 
 **Question:** Which model layers best predict neural/behavioral responses?
 
-**What TensorScope provides:**
-- **Layer-wise representations**: Extract features from each layer
-- **Fisher importance**: Weight features by their importance to the model's task
-- **Ablation analysis**: Test causal importance via Fisher-weighted ablations
+**What TensorScope provides (built-in):**
+- ✅ `grouped_fisher`: Fisher importance per layer/head
+- ✅ `compute_effective_rank`: Layer dimensionality
+- ✅ `compute_superposition_regime`: Feature organization
+
+**What you implement:**
+- 🔧 Extract layer activations (using hooks, see above)
+- 🔧 Ridge/PLS regression (using sklearn)
+- 🔧 Fisher-weighted ablations (mask features and re-run)
 
 **Example workflow:**
 ```python
-# Step 1: Extract layer features
-results = analyzer.analyze_models([model])
-layer_features = results.get('layer_activations')  # [layers x samples x features]
+# Step 1: Extract layer features (YOUR CODE - see Section 1)
+layer_features = get_layer_activations(model, batch)
 
-# Step 2: Regress neural responses on layer features
+# Step 2: Regress neural responses (YOUR CODE)
 from sklearn.linear_model import Ridge
-from sklearn.cross_decomposition import PLSRegression
+from sklearn.model_selection import cross_val_score
 
 neural_responses = load_your_neural_data()  # [samples x neurons]
 
 # Test each layer
 predictivity_scores = {}
 for layer_name, features in layer_features.items():
-    # Ridge regression
+    # Flatten features
+    X = features.reshape(features.shape[0], -1).cpu().numpy()
+    y = neural_responses
+    
+    # Ridge regression with cross-validation
     ridge = Ridge(alpha=1.0)
-    ridge.fit(features, neural_responses)
-    r2 = ridge.score(features, neural_responses)
-    predictivity_scores[layer_name] = r2
+    scores = cross_val_score(ridge, X, y, cv=5, scoring='r2')
+    predictivity_scores[layer_name] = scores.mean()
 
-# Step 3: Validate with Fisher-weighted ablations
+print(f"Best predictive layer: {max(predictivity_scores, key=predictivity_scores.get)}")
+
+# Step 3: Validate with Fisher-weighted ablations (YOUR CODE)
+results = analyzer.analyze_models([model])
 fisher_importance = results.get('grouped_fisher')
 
-# Ablate high-Fisher vs low-Fisher features
-high_fisher_features = get_top_k_features(fisher_importance, k=100)
-low_fisher_features = get_bottom_k_features(fisher_importance, k=100)
+# Identify high-Fisher features
+# NOTE: Fisher is per-layer/head, not per-feature
+# You'll need to map this to individual features based on your architecture
+high_fisher_layers = sorted(fisher_importance.items(), 
+                            key=lambda x: x[1], reverse=True)[:5]
 
-# Re-run regression with ablated features
-# Compare: does ablating high-Fisher features hurt neural predictivity more?
+print(f"High-Fisher layers: {[name for name, _ in high_fisher_layers]}")
+
+# Ablate these layers and re-test neural predictivity
+# (Implementation depends on your specific ablation strategy)
 ```
 
-**Advanced: Partial Least Squares (PLS)**
-```python
-# PLS finds latent components that maximize covariance
-pls = PLSRegression(n_components=10)
-pls.fit(layer_features, neural_responses)
-
-# Get latent components
-model_components = pls.x_scores_  # Model latent space
-neural_components = pls.y_scores_  # Neural latent space
-
-# Analyze component structure
-component_importance = np.abs(pls.x_weights_)  # Feature importance per component
-```
-
-**Why this matters:** Identifies which model features are most relevant for predicting neural activity. Fisher-weighted ablations test causal importance, not just correlation. Enables targeted model interventions to improve neural alignment.
+**Why this matters:** Identifies which model features are most relevant for predicting neural activity. Fisher importance provides a principled way to prioritize features for ablation studies.
 
 ---
 
@@ -159,16 +241,20 @@ component_importance = np.abs(pls.x_weights_)  # Feature importance per componen
 
 **Question:** How much superposition (multiple features per neuron) exists in your model vs. biological neurons?
 
-**What TensorScope provides:**
-- **Superposition strength**: Quantifies feature interference (how many features per dimension)
-- **Feature sparsity**: Measures activation sparsity (L0/L1 norms)
-- **Polysemanticity analysis**: Identifies neurons responding to multiple unrelated features
+**What TensorScope provides (built-in):**
+- ✅ `compute_superposition_regime`: Quantifies feature interference
+- ✅ `compute_feature_sparsity`: L0/L1 activation sparsity
+- ✅ `compute_vector_interference`: Dimensional overlap
+
+**What you implement:**
+- 🔧 Compute selectivity indices for your neural data
+- 🔧 Compare distributions (model vs. neural)
+- 🔧 Identify polysemantic neurons in both
 
 **Example workflow:**
 ```python
+# Step 1: Get model superposition metrics (TensorScope)
 results = analyzer.analyze_models([model])
-
-# Superposition metrics
 superposition = results.get('superposition_regime')
 sparsity = results.get('feature_sparsity')
 
@@ -179,36 +265,62 @@ for layer_name in superposition.keys():
     
     print(f"{layer_name}:")
     print(f"  Superposition: {interference:.3f}")
-    print(f"  Active features: {sparsity_l0:.1f}/{total_features}")
-```
+    print(f"  Active features: {sparsity_l0:.1f}")
 
-**Compare to neural selectivity:**
-```python
-# Your neural tuning curves
-neural_selectivity = compute_selectivity_index(neural_responses)  # Your function
+# Step 2: Compare to neural selectivity (YOUR CODE)
+def compute_selectivity_index(responses, category_labels):
+    """
+    Compute selectivity index for each neuron.
+    Higher = more selective (fewer categories activate neuron)
+    """
+    selectivity = []
+    for neuron_idx in range(responses.shape[1]):
+        neuron_resp = responses[:, neuron_idx]
+        
+        # Compute mean response per category
+        category_means = []
+        for cat in np.unique(category_labels):
+            cat_mask = category_labels == cat
+            category_means.append(neuron_resp[cat_mask].mean())
+        
+        # Selectivity = (max - mean) / (max + mean)
+        max_resp = max(category_means)
+        mean_resp = np.mean(category_means)
+        si = (max_resp - mean_resp) / (max_resp + mean_resp + 1e-8)
+        selectivity.append(si)
+    
+    return np.array(selectivity)
 
-# Model feature selectivity
-model_selectivity = compute_selectivity_index(layer_features)
+# Your neural data
+neural_responses = load_your_neural_data()  # [samples x neurons]
+category_labels = load_category_labels()     # [samples]
+
+neural_selectivity = compute_selectivity_index(neural_responses, category_labels)
+
+# Model features (extract using hooks)
+layer_features = get_layer_activations(model, batch)
+model_features = layer_features['layer_10']  # Pick a layer
+model_selectivity = compute_selectivity_index(
+    model_features.reshape(-1, model_features.shape[-1]).cpu().numpy(),
+    category_labels
+)
 
 # Compare distributions
 from scipy.stats import ks_2samp
 stat, p = ks_2samp(neural_selectivity, model_selectivity)
 print(f"Selectivity distributions differ: p={p:.4f}")
+
+# Plot
+import matplotlib.pyplot as plt
+plt.hist(neural_selectivity, bins=50, alpha=0.5, label='Neural')
+plt.hist(model_selectivity, bins=50, alpha=0.5, label='Model')
+plt.xlabel('Selectivity Index')
+plt.ylabel('Count')
+plt.legend()
+plt.savefig('selectivity_comparison.png')
 ```
 
-**Relate to tuning curves:**
-```python
-# Identify polysemantic neurons (respond to multiple categories)
-polysemantic_neurons = identify_polysemantic(layer_features, category_labels)
-
-# Compare to neural polysemanticity
-neural_polysemantic = identify_polysemantic(neural_responses, category_labels)
-
-print(f"Model polysemantic: {len(polysemantic_neurons)}/{total_neurons}")
-print(f"Neural polysemantic: {len(neural_polysemantic)}/{total_neural_units}")
-```
-
-**Why this matters:** Superposition is a key efficiency mechanism in both artificial and biological networks. Quantifying it enables direct comparison of coding strategies. High superposition may explain why both ANNs and brains can represent more features than they have neurons.
+**Why this matters:** Superposition is a key efficiency mechanism in both artificial and biological networks. Quantifying it enables direct comparison of coding strategies.
 
 ---
 
@@ -216,53 +328,59 @@ print(f"Neural polysemantic: {len(neural_polysemantic)}/{total_neural_units}")
 
 **Question:** How does geometric structure relate to category separability and invariance?
 
-**What TensorScope provides:**
-- **Effective rank**: Intrinsic dimensionality of representations
-- **Embedding singularities**: Geometric anomalies (Robinson et al. 2025)
-- **Manifold curvature**: Ricci curvature for geometric characterization
-- **Fiber bundle tests**: Statistical tests for manifold hypothesis
+**What TensorScope provides (built-in):**
+- ✅ `compute_effective_rank`: Intrinsic dimensionality
+- ✅ `embedding_singularities`: Geometric anomalies (Robinson et al.)
+- ✅ `manifold_curvature`: Ricci curvature (if implemented)
+
+**What you implement:**
+- 🔧 Category separability analysis (LDA, SVM)
+- 🔧 Invariance testing (transformations)
+- 🔧 Correlation with behavioral metrics
 
 **Example workflow:**
 ```python
+# Step 1: Get model geometry (TensorScope)
 results = analyzer.analyze_models([model])
-
-# Geometric metrics
 effective_rank = results.get('effective_rank')
 singularities = results.get('embedding_singularities')
-curvature = results.get('manifold_curvature')
 
 # Per-layer geometry
 for layer_name in effective_rank.keys():
     rank = effective_rank[layer_name]
-    n_singularities = singularities[layer_name]['count']
-    mean_curvature = curvature[layer_name]['mean_ricci']
+    n_singularities = singularities.get(layer_name, {}).get('count', 0)
     
     print(f"{layer_name}:")
     print(f"  Effective rank: {rank:.1f}")
     print(f"  Singularities: {n_singularities}")
-    print(f"  Mean curvature: {mean_curvature:.4f}")
-```
 
-**Link to category separability:**
-```python
-# Compute category separability in representation space
+# Step 2: Link to category separability (YOUR CODE)
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
-lda = LinearDiscriminantAnalysis()
-lda.fit(layer_features, category_labels)
-separability = lda.score(layer_features, category_labels)
+# Extract layer features
+layer_features = get_layer_activations(model, batch)
+category_labels = load_category_labels()
 
-# Correlate with geometry
+separability_per_layer = {}
+for layer_name, features in layer_features.items():
+    X = features.reshape(features.shape[0], -1).cpu().numpy()
+    
+    lda = LinearDiscriminantAnalysis()
+    lda.fit(X, category_labels)
+    separability = lda.score(X, category_labels)
+    separability_per_layer[layer_name] = separability
+
+# Correlate geometry with separability
 import pandas as pd
+from scipy.stats import spearmanr
+
 df = pd.DataFrame({
-    'layer': layer_names,
-    'effective_rank': [effective_rank[l] for l in layer_names],
-    'singularities': [singularities[l]['count'] for l in layer_names],
-    'separability': [separability_per_layer[l] for l in layer_names]
+    'layer': list(effective_rank.keys()),
+    'effective_rank': [effective_rank[l] for l in effective_rank.keys()],
+    'singularities': [singularities.get(l, {}).get('count', 0) for l in effective_rank.keys()],
+    'separability': [separability_per_layer.get(l, 0) for l in effective_rank.keys()]
 })
 
-# Test correlations
-from scipy.stats import spearmanr
 rho_rank, p_rank = spearmanr(df['effective_rank'], df['separability'])
 rho_sing, p_sing = spearmanr(df['singularities'], df['separability'])
 
@@ -270,43 +388,28 @@ print(f"Rank vs separability: ρ={rho_rank:.3f}, p={p_rank:.4f}")
 print(f"Singularities vs separability: ρ={rho_sing:.3f}, p={p_sing:.4f}")
 ```
 
-**Invariance analysis:**
-```python
-# Test invariance to transformations (rotation, translation, etc.)
-transformed_features = apply_transformations(layer_features)  # Your function
-
-# Measure geometric stability
-from scipy.spatial.distance import cdist
-original_distances = cdist(layer_features, layer_features)
-transformed_distances = cdist(transformed_features, transformed_features)
-
-invariance_score = np.corrcoef(
-    original_distances.flatten(), 
-    transformed_distances.flatten()
-)[0, 1]
-
-print(f"Geometric invariance: {invariance_score:.3f}")
-```
-
-**Why this matters:** Geometric structure constrains what representations can be learned and how they generalize. Singularities indicate regions of instability. Effective rank measures compression. Relating geometry to behavioral metrics (separability, invariance) connects representation structure to function.
+**Why this matters:** Geometric structure constrains what representations can be learned and how they generalize. Relating geometry to behavioral metrics connects representation structure to function.
 
 ---
 
 ### 5. Circuit Motifs
 
-**Question:** Do attention circuits in transformers correspond to compositional/relational structure in neural circuits?
+**Question:** Do attention circuits in transformers correspond to compositional structure?
 
-**What TensorScope provides:**
-- **QK-OV pairing**: Identifies which attention heads compose (query-key → output-value chains)
-- **Induction heads**: Detects in-context learning circuits
-- **Attention flow patterns**: Analyzes information routing (previous token, skip connections, etc.)
-- **Circuit specialization**: Measures task-specificity of attention heads
+**What TensorScope provides (built-in):**
+- ✅ `qkov_pairing`: QK-OV composition patterns
+- ✅ `induction_head_strength`: In-context learning circuits
+- ✅ `attention_flow_patterns`: Information routing
+
+**What you implement:**
+- 🔧 Neural circuit graphs (from your data)
+- 🔧 Graph property comparison (degree, betweenness)
+- 🔧 Compositional generalization tests
 
 **Example workflow:**
 ```python
+# Step 1: Get model circuits (TensorScope)
 results = analyzer.analyze_models([transformer_model])
-
-# Circuit analysis
 qkov_pairing = results.get('qkov_pairing')
 induction_heads = results.get('induction_head_strength')
 attention_flow = results.get('attention_flow_patterns')
@@ -315,61 +418,44 @@ attention_flow = results.get('attention_flow_patterns')
 strong_induction = [h for h, score in induction_heads.items() if score > 0.8]
 print(f"Strong induction heads: {strong_induction}")
 
-# QK-OV composition patterns
-for head_pair, pairing_strength in qkov_pairing.items():
-    if pairing_strength > 0.7:
-        print(f"Strong composition: {head_pair} (strength={pairing_strength:.3f})")
-```
-
-**Relate to neural circuits:**
-```python
-# Your neural circuit analysis (e.g., from calcium imaging)
+# Step 2: Compare to neural circuits (YOUR CODE)
+# Load your neural connectivity data
 neural_circuit_graph = load_neural_connectivity()  # Adjacency matrix
 
-# Model circuit graph (from attention patterns)
+# Build model circuit graph from attention patterns
+def build_attention_graph(attention_flow):
+    """Convert attention patterns to graph"""
+    # YOUR IMPLEMENTATION
+    # Extract attention weights, threshold, create adjacency matrix
+    pass
+
 model_circuit_graph = build_attention_graph(attention_flow)
 
 # Compare graph properties
-from networkx import Graph, degree_centrality, betweenness_centrality
+import networkx as nx
+from scipy.stats import ks_2samp
 
-neural_graph = Graph(neural_circuit_graph)
-model_graph = Graph(model_circuit_graph)
+neural_graph = nx.Graph(neural_circuit_graph)
+model_graph = nx.Graph(model_circuit_graph)
 
 # Degree distributions
-neural_degrees = list(degree_centrality(neural_graph).values())
-model_degrees = list(degree_centrality(model_graph).values())
+neural_degrees = list(nx.degree_centrality(neural_graph).values())
+model_degrees = list(nx.degree_centrality(model_graph).values())
 
-from scipy.stats import ks_2samp
 stat, p = ks_2samp(neural_degrees, model_degrees)
 print(f"Degree distributions differ: p={p:.4f}")
 
-# Identify hub nodes (high betweenness)
-neural_hubs = sorted(betweenness_centrality(neural_graph).items(), 
+# Hub identification
+neural_hubs = sorted(nx.betweenness_centrality(neural_graph).items(), 
                      key=lambda x: x[1], reverse=True)[:10]
-model_hubs = sorted(betweenness_centrality(model_graph).items(), 
+model_hubs = sorted(nx.betweenness_centrality(model_graph).items(), 
                     key=lambda x: x[1], reverse=True)[:10]
 
 print(f"Neural hubs: {neural_hubs}")
 print(f"Model hubs: {model_hubs}")
 ```
 
-**Compositional structure:**
-```python
-# Test if induction heads enable compositional generalization
-# (similar to how neural circuits combine primitives)
-
-# Ablate induction heads
-ablated_model = ablate_heads(model, strong_induction)
-
-# Test on compositional tasks
-compositional_accuracy = test_compositional_generalization(ablated_model)
-baseline_accuracy = test_compositional_generalization(model)
-
-print(f"Compositional accuracy: {baseline_accuracy:.3f} → {compositional_accuracy:.3f}")
-print(f"Induction heads necessary: {compositional_accuracy < baseline_accuracy}")
-```
-
-**Why this matters:** Attention mechanisms in transformers may implement similar compositional principles as neural circuits. QK-OV pairing resembles synaptic chains. Induction heads enable in-context learning, possibly analogous to rapid binding in hippocampus. Systematic comparison reveals shared computational motifs.
+**Why this matters:** Attention mechanisms may implement similar compositional principles as neural circuits. Systematic comparison reveals shared computational motifs.
 
 ---
 
@@ -383,7 +469,7 @@ from unified_model_analysis import UnifiedModelAnalyzer
 # Your models
 models = [alexnet, resnet50, vit_base, your_custom_model]
 
-# Analyze all models
+# Analyze all models (TensorScope)
 analyzer = UnifiedModelAnalyzer()
 all_results = {}
 
@@ -391,140 +477,41 @@ for model in models:
     results = analyzer.analyze_models([model])
     all_results[model.name] = results
 
-# Compare to neural benchmarks
+# Compare to neural benchmarks (YOUR CODE)
 neural_benchmarks = load_neural_benchmarks()  # Your data
 
 brain_scores = {}
 for model_name, results in all_results.items():
-    # CKA alignment
+    # Extract model metrics
     cka = results.get('cka_similarity')
-    alignment = compute_alignment(cka, neural_benchmarks['V1'])
-    
-    # Neural predictivity
-    features = results.get('layer_activations')
-    predictivity = compute_predictivity(features, neural_benchmarks['IT'])
-    
-    # Geometric similarity
     geometry = results.get('embedding_singularities')
-    geo_score = compare_geometry(geometry, neural_benchmarks['geometry'])
+    
+    # YOUR COMPARISON CODE
+    # Compute alignment, predictivity, geometric similarity
+    # using your neural data and analysis functions
     
     brain_scores[model_name] = {
-        'alignment': alignment,
-        'predictivity': predictivity,
-        'geometry': geo_score,
-        'overall': (alignment + predictivity + geo_score) / 3
+        'alignment': your_alignment_function(cka, neural_benchmarks),
+        'predictivity': your_predictivity_function(model, neural_benchmarks),
+        'geometry': your_geometry_function(geometry, neural_benchmarks),
     }
 
 # Rank models
-ranked = sorted(brain_scores.items(), key=lambda x: x[1]['overall'], reverse=True)
+ranked = sorted(brain_scores.items(), 
+                key=lambda x: sum(x[1].values()), reverse=True)
 print("Brain-score rankings:")
 for rank, (model_name, scores) in enumerate(ranked, 1):
-    print(f"{rank}. {model_name}: {scores['overall']:.3f}")
+    print(f"{rank}. {model_name}: {sum(scores.values()):.3f}")
 ```
-
-### Workflow 2: Training Dynamics & Neural Alignment
-
-```python
-# Track how neural alignment evolves during training
-checkpoints = [f'ckpt_step_{i}.pt' for i in [1000, 5000, 10000, 50000, 100000]]
-
-results = analyzer.analyze_models(checkpoints)
-
-# Extract alignment trajectory
-alignment_over_time = []
-for ckpt_results in results:
-    cka = ckpt_results.get('cka_similarity')
-    alignment = compute_alignment(cka, neural_rdm)
-    alignment_over_time.append(alignment)
-
-# Plot
-import matplotlib.pyplot as plt
-steps = [1000, 5000, 10000, 50000, 100000]
-plt.plot(steps, alignment_over_time)
-plt.xlabel('Training step')
-plt.ylabel('Neural alignment (CKA)')
-plt.title('When does model become brain-like?')
-plt.savefig('alignment_trajectory.png')
-
-# Identify critical transition point
-max_increase_idx = np.argmax(np.diff(alignment_over_time))
-critical_step = steps[max_increase_idx]
-print(f"Largest alignment increase at step {critical_step}")
-```
-
-### Workflow 3: Cross-Species Comparison
-
-```python
-# Compare model to multiple species
-species_data = {
-    'macaque_V1': load_macaque_v1_data(),
-    'macaque_IT': load_macaque_it_data(),
-    'mouse_V1': load_mouse_v1_data(),
-    'human_fMRI': load_human_fmri_data()
-}
-
-results = analyzer.analyze_models([model])
-
-# Compute alignment to each species
-species_alignment = {}
-for species_name, neural_data in species_data.items():
-    cka = results.get('cka_similarity')
-    alignment = compute_alignment(cka, neural_data)
-    species_alignment[species_name] = alignment
-
-# Which species does model match best?
-best_match = max(species_alignment, key=species_alignment.get)
-print(f"Best match: {best_match} (alignment={species_alignment[best_match]:.3f})")
-
-# Hierarchical clustering of alignments
-from scipy.cluster.hierarchy import dendrogram, linkage
-alignment_matrix = compute_alignment_matrix(species_data, model_representations)
-linkage_matrix = linkage(alignment_matrix, method='ward')
-dendrogram(linkage_matrix, labels=list(species_data.keys()) + ['model'])
-plt.title('Representational similarity: Model vs. species')
-plt.savefig('species_comparison.png')
-```
-
----
-
-## Relevant Metrics
-
-**For representational alignment:**
-- `cka_similarity`: Centered Kernel Alignment between layers
-- `rsa_similarity`: Representational Similarity Analysis
-- `block_cka_gap`: Alignment differences across model blocks
-
-**For neural predictivity:**
-- `layer_activations`: Features from each layer
-- `grouped_fisher`: Importance weights for features
-- `fisher_pruning_masks`: Identify critical features
-
-**For polysemanticity:**
-- `superposition_regime`: Feature interference quantification
-- `feature_sparsity`: L0/L1 activation sparsity
-- `vector_interference`: Dimensional overlap analysis
-
-**For geometry:**
-- `effective_rank`: Intrinsic dimensionality
-- `embedding_singularities`: Geometric anomalies
-- `manifold_curvature`: Ricci curvature per layer
-- `robinson_fiber_test`: Manifold hypothesis testing
-
-**For circuits:**
-- `qkov_pairing`: Attention head composition
-- `induction_head_strength`: In-context learning circuits
-- `attention_flow_patterns`: Information routing
-- `attention_entropy`: Attention distribution analysis
-
-See [main README](../README.md) for complete metric list.
 
 ---
 
 ## Integration with Neuroscience Tools
 
-TensorScope outputs are designed to integrate with standard neuroscience analysis pipelines:
+TensorScope outputs can be integrated with standard neuroscience analysis tools, but **you need to write the integration code**.
 
-**Export to MATLAB/Python:**
+### Export to MATLAB/Python
+
 ```python
 results = analyzer.analyze_models([model])
 
@@ -533,30 +520,43 @@ results.save_report("model_analysis.json")
 
 # Or export specific metrics as NumPy arrays
 import numpy as np
-np.save('layer_features.npy', results.get('layer_activations'))
-np.save('cka_matrix.npy', results.get('cka_similarity'))
+layer_features = get_layer_activations(model, batch)  # Your function
+np.save('layer_features.npy', layer_features)
+
+cka_matrix = results.get('cka_similarity')
+# Convert dict to array for your specific use case
 ```
 
-**Integration with Brain-Score:**
+### Integration with Brain-Score
+
 ```python
-# TensorScope features → Brain-Score benchmark
+# TensorScope provides model metrics
+# You provide the Brain-Score integration
+
 from brainscore import benchmark_pool
 
-features = results.get('layer_activations')
+# Extract features using YOUR code (see Section 1)
+features = get_layer_activations(model, batch)
+
+# Use Brain-Score benchmark
 brain_score = benchmark_pool['dicarlo.MajajHong2015'].score(features)
 print(f"Brain-Score: {brain_score}")
 ```
 
-**Integration with RSA Toolbox:**
-```python
-# Export RDMs in RSA Toolbox format
-rdms = results.get('cka_similarity')
+### Integration with RSA Toolbox
 
-# Convert to RSA format
+```python
+# Export RDMs for RSA Toolbox (YOUR CODE)
+
+# Get model representations
+layer_rdms = compute_layer_rdms(model, batch)  # Your function from Section 1
+
+# Convert to RSA Toolbox format
 from rsatoolbox.rdm import RDMs
+
 rsa_rdms = RDMs(
-    dissimilarities=rdms,
-    descriptors={'layer': layer_names}
+    dissimilarities=np.array(list(layer_rdms.values())),
+    descriptors={'layer': list(layer_rdms.keys())}
 )
 
 # Now use RSA Toolbox functions
@@ -564,26 +564,28 @@ from rsatoolbox.inference import compare
 comparison = compare(rsa_rdms, neural_rdms, method='corr')
 ```
 
-**Integration with NMA (Neuromatch Academy) tools:**
-```python
-# Use with NMA dimensionality reduction tools
-from nma_tools import compute_pca, compute_tsne
-
-features = results.get('layer_activations')
-pca_features = compute_pca(features, n_components=50)
-tsne_embedding = compute_tsne(pca_features)
-
-# Visualize alongside neural data
-plot_neural_and_model_embeddings(neural_tsne, tsne_embedding)
-```
-
 ---
 
-## Publications Using TensorScope for Neuro-AI
+## Summary: What's Built-In vs. What You Implement
 
-*(This section will be populated as researchers publish work using TensorScope for neuroscience applications)*
+### ✅ **TensorScope Provides (Built-In):**
+- CKA similarity (within model)
+- Superposition & feature sparsity metrics
+- Manifold geometry (singularities, effective rank)
+- Circuit analysis (QK-OV, induction heads)
+- Fisher information (importance, overlap)
 
-**If you use TensorScope for neuroscience research, please let us know so we can list your work here!**
+### 🔧 **You Need to Implement:**
+- Layer activation extraction (using PyTorch hooks)
+- Neural RDM loading and comparison
+- Ridge/PLS regression (using sklearn)
+- Alignment scoring (using scipy)
+- Brain-Score integration
+- RSA Toolbox export
+- Graph analysis for circuits
+- Selectivity index computation
+
+**TensorScope is a model analysis framework, not a neuroscience-specific tool.** It provides comprehensive model metrics that can be compared with neural data using standard neuroscience analysis libraries (sklearn, scipy, Brain-Score, RSA Toolbox).
 
 ---
 
@@ -599,15 +601,6 @@ If you use TensorScope for neuroscience research, please cite:
   note={Infrastructure for systematic correlation discovery across optimization, representation, and interpretability metrics}
 }
 ```
-
----
-
-## Questions or Collaboration?
-
-For neuroscience-specific questions or collaboration opportunities:
-- Open an issue on GitHub with the `neuroscience` tag
-- Email: [your email]
-- We're particularly interested in validating these methods on real neural data!
 
 ---
 
