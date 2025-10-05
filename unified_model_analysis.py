@@ -16,7 +16,7 @@ import sys
 import json
 import warnings
 import io
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 
 # Set PyTorch CUDA allocator configuration BEFORE importing torch
 # This prevents memory fragmentation when processing multiple batches
@@ -3343,13 +3343,13 @@ class MetricRegistry:
                     if need_hidden_states:
                         outputs = model(**device_batch, output_hidden_states=True)
                     else:
-                        outputs = model(**device_batch)
+                    outputs = model(**device_batch)
                 else:
                     # Request hidden_states only if needed (for sparsity analysis)
                     if need_hidden_states:
                         outputs = model(**batch, output_hidden_states=True)
-                    else:
-                        outputs = model(**batch)
+                else:
+                    outputs = model(**batch)
 
                 # Extract final hidden states for sparsity analysis
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
@@ -3404,7 +3404,7 @@ class MetricRegistry:
                 if need_hidden_states:
                     outputs = model(**mini_batch, output_hidden_states=True)
                 else:
-                    outputs = model(**mini_batch)
+                outputs = model(**mini_batch)
 
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
                     if preserve_gradients:
@@ -5061,48 +5061,48 @@ class MetricRegistry:
 
                 # Capture all stdout (including tqdm) to prevent conflicts with logging
                 output_buffer = io.StringIO()
-                
+
                 try:
-                    # Redirect stdout during superposition analysis to capture tqdm output
-                    with redirect_stdout(output_buffer):
-                        # CRITICAL FIX: Some superposition functions expect (model, batch), not weight_matrix!
-                        # compute_superposition_trajectory and analyze_model extract the weight matrix themselves
-                        if 'compute_superposition_trajectory' in func_name or 'analyze_model_superposition' in func_name:
-                            # These functions expect (model, batch) and extract weight_matrix internally
-                            # Get the original model (may have been moved to CPU for memory management)
-                            model = context.models[0] if context.models else context.model
-                            # Clean up weight_matrix since we won't use it
-                            del weight_matrix
+                    # Redirect stdout/stderr during superposition analysis to capture tqdm output (tqdm uses stderr)
+                    with redirect_stdout(output_buffer), redirect_stderr(output_buffer):
+                    # CRITICAL FIX: Some superposition functions expect (model, batch), not weight_matrix!
+                    # compute_superposition_trajectory and analyze_model extract the weight matrix themselves
+                    if 'compute_superposition_trajectory' in func_name or 'analyze_model_superposition' in func_name:
+                        # These functions expect (model, batch) and extract weight_matrix internally
+                        # Get the original model (may have been moved to CPU for memory management)
+                        model = context.models[0] if context.models else context.model
+                        # Clean up weight_matrix since we won't use it
+                        del weight_matrix
                             # Disable progress bars when called from unified_model_analysis to prevent conflicts
                             try:
                                 result = func(model, context.batch, show_progress=False)
                             except TypeError:
                                 # Fallback if show_progress parameter not supported
-                                result = func(model, context.batch)
-                        elif 'comprehensive_superposition_analysis' in func_name:
-                            # This method has a return_dict parameter for JSON serialization
+                        result = func(model, context.batch)
+                    elif 'comprehensive_superposition_analysis' in func_name:
+                        # This method has a return_dict parameter for JSON serialization
                             # Disable progress bars when called from unified_model_analysis to prevent conflicts
                             try:
                                 result = func(weight_matrix, return_dict=True, show_progress=False)
                             except TypeError:
                                 # Fallback if show_progress parameter not supported
-                                result = func(weight_matrix, return_dict=True)
-                        elif 'vector_interference_optimized' in func_name or 'vector_interference' in func_name:
-                            # This method takes return_norms parameter
+                        result = func(weight_matrix, return_dict=True)
+                    elif 'vector_interference_optimized' in func_name or 'vector_interference' in func_name:
+                        # This method takes return_norms parameter
                             # Disable progress bars when called from unified_model_analysis to prevent conflicts
                             try:
                                 result = func(weight_matrix, return_norms=custom_args.get('return_norms', True), show_progress=False)
                             except TypeError:
                                 # Fallback if show_progress parameter not supported
-                                result = func(weight_matrix, return_norms=custom_args.get('return_norms', True))
-                        else:
-                            # Generic superposition method that takes weight_matrix
+                        result = func(weight_matrix, return_norms=custom_args.get('return_norms', True))
+                    else:
+                        # Generic superposition method that takes weight_matrix
                             # Disable progress bars when called from unified_model_analysis to prevent conflicts
                             try:
                                 result = func(weight_matrix, show_progress=False)
                             except TypeError:
                                 # Fallback if show_progress parameter not supported
-                                result = func(weight_matrix)
+                        result = func(weight_matrix)
                     
                     # Process captured output - integrate tqdm progress into logging system
                     captured = output_buffer.getvalue()
@@ -5232,17 +5232,17 @@ class MetricRegistry:
 
                 # Capture all stdout (including tqdm) to prevent conflicts with logging
                 output_buffer = io.StringIO()
-                
+
                 try:
                     # Redirect stdout during sparsity analysis to capture tqdm output
                     with redirect_stdout(output_buffer):
-                        # The NaN/Inf cleaning is now handled inside compute_feature_sparsity in enhanced.py
+                    # The NaN/Inf cleaning is now handled inside compute_feature_sparsity in enhanced.py
                         # Disable progress bars when called from unified_model_analysis to prevent conflicts
                         try:
                             result = func(activations=activations, threshold=custom_args.get('threshold', 0.01), show_progress=False)
                         except TypeError:
                             # Fallback if show_progress parameter not supported
-                            result = func(activations=activations, threshold=custom_args.get('threshold', 0.01))
+                    result = func(activations=activations, threshold=custom_args.get('threshold', 0.01))
                     
                     # Process captured output - integrate tqdm progress into logging system
                     captured = output_buffer.getvalue()
@@ -7056,7 +7056,6 @@ class UnifiedModelAnalyzer:
                         if metric_name in fisher_metrics_computed_in_suite:
                             # Check if this metric was already computed in the suite
                             if metric_name == 'compute_fisher_importance' and 'importance' in fisher_analysis_results:
-                                logger.info(f"  ↔️ Skipping {metric_name} - already computed in Fisher analysis suite")
                                 # Add the pre-computed result to metrics
                                 if fisher_analysis_results.get('importance'):
                                     metrics[metric_name] = MetricResult(
@@ -7067,7 +7066,6 @@ class UnifiedModelAnalyzer:
                                     )
                                 continue
                             elif metric_name == 'compare_task_fisher' and 'comparison' in fisher_analysis_results:
-                                logger.info(f"  ↔️ Skipping {metric_name} - already computed in Fisher analysis suite")
                                 if fisher_analysis_results.get('comparison'):
                                     metrics[metric_name] = MetricResult(
                                         name=metric_name,
@@ -7077,7 +7075,6 @@ class UnifiedModelAnalyzer:
                                     )
                                 continue
                             elif metric_name == 'compute_fisher_overlap' and 'overlap_analysis' in fisher_analysis_results:
-                                logger.info(f"  ↔️ Skipping {metric_name} - already computed in Fisher analysis suite")
                                 if fisher_analysis_results.get('overlap_analysis'):
                                     metrics[metric_name] = MetricResult(
                                         name=metric_name,
@@ -7213,7 +7210,6 @@ class UnifiedModelAnalyzer:
                         if metric_name in fisher_metrics_computed_in_suite:
                             # Check if this metric was already computed in the suite
                             if metric_name == 'compute_fisher_importance' and 'importance' in fisher_analysis_results:
-                                logger.info(f"  ↔️ Skipping {metric_name} - already computed in Fisher analysis suite")
                                 # Add the pre-computed result to metrics
                                 if fisher_analysis_results.get('importance'):
                                     metrics[metric_name] = MetricResult(
@@ -7224,7 +7220,6 @@ class UnifiedModelAnalyzer:
                                     )
                                 continue
                             elif metric_name == 'compare_task_fisher' and 'comparison' in fisher_analysis_results:
-                                logger.info(f"  ↔️ Skipping {metric_name} - already computed in Fisher analysis suite")
                                 if fisher_analysis_results.get('comparison'):
                                     metrics[metric_name] = MetricResult(
                                         name=metric_name,
@@ -7234,7 +7229,6 @@ class UnifiedModelAnalyzer:
                                     )
                                 continue
                             elif metric_name == 'compute_fisher_overlap' and 'overlap_analysis' in fisher_analysis_results:
-                                logger.info(f"  ↔️ Skipping {metric_name} - already computed in Fisher analysis suite")
                                 if fisher_analysis_results.get('overlap_analysis'):
                                     metrics[metric_name] = MetricResult(
                                         name=metric_name,
@@ -9940,7 +9934,7 @@ class UnifiedModelAnalyzer:
             device = next(model.parameters()).device
             if batch is not None:
                 batch = {k: v.to(device) if torch.is_tensor(v) else v
-                        for k, v in batch.items()}
+                            for k, v in batch.items()}
 
             # Update K-FAC factors
             if hasattr(advanced_collector, '_update_kfac_factors'):
