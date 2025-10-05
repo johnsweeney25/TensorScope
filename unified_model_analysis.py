@@ -3258,9 +3258,15 @@ class MetricRegistry:
 
         return results
 
-    def _extract_superposition_data(self, model, batch, preserve_gradients: bool = False) -> Tuple[Dict[str, torch.Tensor], Any]:
+    def _extract_superposition_data(self, model, batch, preserve_gradients: bool = False, need_hidden_states: bool = True) -> Tuple[Dict[str, torch.Tensor], Any]:
         """
         Extract minimal data needed for superposition/sparsity analysis and free GPU memory.
+        
+        Args:
+            model: Model to extract data from
+            batch: Input batch
+            preserve_gradients: Whether to preserve gradients
+            need_hidden_states: Whether to request hidden_states output (only needed for sparsity analysis)
 
         THEORETICAL FOUNDATION:
         This function implements the critical separation between weight-space and activation-space
@@ -3332,11 +3338,18 @@ class MetricRegistry:
                             device_batch[key] = value.to(original_device)
                         else:
                             device_batch[key] = value
-                    # CRITICAL: Request hidden_states output for activation extraction
-                    outputs = model(**device_batch, output_hidden_states=True)
+                    # Request hidden_states only if needed (for sparsity analysis)
+                    # This prevents unnecessary memory allocation in other metrics
+                    if need_hidden_states:
+                        outputs = model(**device_batch, output_hidden_states=True)
+                    else:
+                        outputs = model(**device_batch)
                 else:
-                    # CRITICAL: Request hidden_states output for activation extraction
-                    outputs = model(**batch, output_hidden_states=True)
+                    # Request hidden_states only if needed (for sparsity analysis)
+                    if need_hidden_states:
+                        outputs = model(**batch, output_hidden_states=True)
+                    else:
+                        outputs = model(**batch)
 
                 # Extract final hidden states for sparsity analysis
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
@@ -3387,8 +3400,11 @@ class MetricRegistry:
                     else:
                         mini_batch[key] = value
 
-                # CRITICAL: Request hidden_states output for activation extraction
-                outputs = model(**mini_batch, output_hidden_states=True)
+                # Request hidden_states only if needed (for sparsity analysis)
+                if need_hidden_states:
+                    outputs = model(**mini_batch, output_hidden_states=True)
+                else:
+                    outputs = model(**mini_batch)
 
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
                     if preserve_gradients:
@@ -4999,7 +5015,8 @@ class MetricRegistry:
                 # Use cached extracted data or extract it now
                 if 'extracted_superposition_data' not in context.custom_data:
                     logger.info(f"Extracting data for {func_name} (will free GPU memory if needed)")
-                    extracted_data, freed_model = self._extract_superposition_data(context.model, context.batch)
+                    # Don't need hidden_states for weight-based superposition analysis
+                    extracted_data, freed_model = self._extract_superposition_data(context.model, context.batch, need_hidden_states=False)
                     context.custom_data['extracted_superposition_data'] = extracted_data
                     # Update model reference to potentially CPU version
                     # Fix: Update the models list instead of trying to set the read-only property
@@ -5170,7 +5187,8 @@ class MetricRegistry:
                 # Use cached extracted data or extract it now
                 if 'extracted_superposition_data' not in context.custom_data:
                     logger.info(f"Extracting activations for {func_name} (will free GPU memory if needed)")
-                    extracted_data, freed_model = self._extract_superposition_data(context.model, context.batch)
+                    # NEED hidden_states for activation sparsity analysis
+                    extracted_data, freed_model = self._extract_superposition_data(context.model, context.batch, need_hidden_states=True)
                     context.custom_data['extracted_superposition_data'] = extracted_data
                     # Update model reference to potentially CPU version
                     # Fix: Update the models list instead of trying to set the read-only property
