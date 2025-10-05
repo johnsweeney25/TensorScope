@@ -87,7 +87,7 @@ Docs: [TracIn](docs/TRACIN_DOCUMENTATION.md) • [Attention Attribution](docs/AT
 - Logit lens
 
 ### Representation & Geometry
-- CKA similarity, block CKA gap
+- CKA/RSA similarity, block CKA gap
 - Effective rank, full effective rank
 - Superposition: vector interference, feature frequency distribution
 - Superposition: strength, dimensional scaling, feature sparsity
@@ -148,6 +148,23 @@ Docs: [Lottery Tickets](docs/LOTTERY_TICKETS_DOCUMENTATION.md)
 - CKA & representational drift
 
 [Quick Start](#quick-start) • [Research Questions](#unexplored-research-questions) • [Examples](#examples) • [Install](#installation)
+
+---
+
+## 🧠 For Neuroscience & Cognitive Science Researchers
+
+**Are you comparing neural networks to brain recordings?** TensorScope provides unified analysis of model internals (Fisher, geometry, circuits) in the same framework you use for neural data (RDMs, regression, manifolds).
+
+**Research questions you can answer:**
+- Does your model's representational geometry (CKA/RSA) match neural recordings?
+- Which layers best predict neural/behavioral responses?
+- How does superposition in models compare to polysemanticity in biological neurons?
+- Do attention circuits correspond to compositional structure in neural circuits?
+- How does geometric structure relate to category separability and invariance?
+
+**[→ Complete Neuroscience Applications Guide](maindocs/NEUROSCIENCE_APPLICATIONS.md)**
+
+Includes: Brain-Score style benchmarking • Neural predictivity workflows • Cross-species comparison • Integration with RSA Toolbox, Brain-Score, and NMA tools
 
 ---
 
