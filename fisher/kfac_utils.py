@@ -305,10 +305,6 @@ class KFACNaturalGradient:
                 # Skip small layers
                 if module.in_features < self.min_layer_size or module.out_features < self.min_layer_size:
                     continue
-                # Skip very large layers that would cause OOM during eigendecomposition
-                if module.in_features > 4096 or module.out_features > 4096:
-                    logger.info(f"Skipping large layer {name} ({module.in_features}x{module.out_features}) to avoid OOM")
-                    continue
                 eligible_layers.append(name)
                 handles.append(module.register_forward_hook(save_input_hook(name)))
                 handles.append(module.register_full_backward_hook(save_grad_hook(name)))
@@ -530,35 +526,26 @@ class KFACNaturalGradient:
         if damping is None:
             damping = self.damping
 
-            orig_device = M.device
-            orig_dtype = M.dtype
+        orig_device = M.device
+        orig_dtype = M.dtype
 
         # Work in float32 for numerical stability (common practice in K-FAC codebases).
-            M_work = M.to(torch.float32)
+        M_work = M.to(torch.float32)
 
         # Decide where to run the eigendecomposition. We prefer the original CUDA device
         # when available, but fall back to CPU if the matrix is likely to exceed memory.
-            if self.use_gpu_eigh and orig_device.type == 'cuda' and torch.cuda.is_available():
-                device_eigh = orig_device
+        if self.use_gpu_eigh and orig_device.type == 'cuda' and torch.cuda.is_available():
+            device_eigh = orig_device
 
-            # Memory check: eigendecomposition needs input matrix + eigenvectors + workspace
-            # Conservative estimate: ~8× matrix size for large matrices
+            # Memory check: the cuSOLVER eigen routines need the input matrix plus ~3×
+            # workspace. If we cannot secure a 50% headroom, fall back to CPU to avoid OOM.
             try:
                 device_index = orig_device.index if orig_device.index is not None else torch.cuda.current_device()
                 free_mem, _ = torch.cuda.mem_get_info(device_index)
                 elem_bytes = M_work.element_size()
                 matrix_bytes = M_work.numel() * elem_bytes
-                
-                # More conservative memory estimate for eigendecomposition
-                n = M_work.shape[0]
-                if n > 2048:
-                    # For large matrices, eigendecomposition can need significant workspace
-                    est_workspace = matrix_bytes * 8
-                else:
-                    est_workspace = matrix_bytes * 3
-                
-                # Use only 30% of free memory to be safe
-                if est_workspace > free_mem * 0.3:
+                est_workspace = matrix_bytes * 3
+                if est_workspace > free_mem * 0.5:
                     logger.debug(
                         "K-FAC stabilisation for %s: expected GPU workspace %.1f GiB exceeds available %.1f GiB;"
                         " using CPU eigendecomposition",
@@ -569,15 +556,15 @@ class KFACNaturalGradient:
                     device_eigh = torch.device('cpu')
             except Exception:
                 # If memory info is unavailable, err on the safe side for very large matrices.
-                if M_work.shape[0] > 2048:
+                if M_work.shape[0] > 8192:
                     device_eigh = torch.device('cpu')
-            else:
-                device_eigh = torch.device('cpu')
+        else:
+            device_eigh = torch.device('cpu')
 
-            M_work = M_work.to(device_eigh)
+        M_work = M_work.to(device_eigh)
 
-            try:
-                eigvals, eigvecs = torch.linalg.eigh(M_work)
+        try:
+            eigvals, eigvecs = torch.linalg.eigh(M_work)
         except RuntimeError as err:
             if device_eigh.type == 'cuda' and 'out of memory' in str(err).lower():
                 logger.warning(
@@ -588,8 +575,8 @@ class KFACNaturalGradient:
                 torch.cuda.empty_cache()
                 M_work = M_work.cpu()
                 eigvals, eigvecs = torch.linalg.eigh(M_work)
-                else:
-                    raise
+            else:
+                raise
 
         try:
             max_eig = eigvals.max()
