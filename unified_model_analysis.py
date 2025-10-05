@@ -5013,7 +5013,7 @@ class MetricRegistry:
                 # Takes task and fisher_type as primary args
                 task_name = self._get_fisher_task_name(func, custom_args, fallback='task1', task_number=1)
                 return func(task=task_name,
-                          fisher_type=custom_args.get('fisher_type', 'ema'))
+                          fisher_type=custom_args.get('fisher_type', 'accumulated'))
 
             # SUPERPOSITION METRICS - need special handling to extract weight matrices
             elif 'vector_interference' in func_name or 'superposition' in func_name:
