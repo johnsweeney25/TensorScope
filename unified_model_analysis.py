@@ -250,7 +250,7 @@ def dump_model_parameter_patterns(model, logger=None):
 # ============================================================================
 # CENTRALIZED MEMORY MANAGEMENT - Simple and Clear
 # ============================================================================
-def cleanup_memory(verbose: bool = False, reason: str = ""):
+def cleanup_memory(verbose: bool = False, reason: str = "", model: Optional[torch.nn.Module] = None):
     """
     Single source of truth for memory cleanup.
     Replaces all scattered cleanup_memory() calls.
@@ -259,21 +259,61 @@ def cleanup_memory(verbose: bool = False, reason: str = ""):
         verbose: Log memory status after cleanup
         reason: Optional reason for cleanup (for debugging)
     """
+    # Optionally clear model gradients aggressively (frees allocated, not just reserved)
+    if model is not None:
+        try:
+            model.zero_grad(set_to_none=True)
+            # Also clear any .grad tensors that might persist on params
+            for p in model.parameters():
+                p.grad = None
+        except Exception as e:
+            logger.debug(f"cleanup_memory: failed to clear model grads: {e}")
+
     # Python garbage collection first
     import gc
     gc.collect()
 
     # Then CUDA cache
     if torch.cuda.is_available():
+        # Capture before stats for more accurate reporting
+        allocated_before = torch.cuda.memory_allocated()
+        reserved_before = torch.cuda.memory_reserved()
+
+        # Release any cached blocks and pending IPC allocations
         torch.cuda.empty_cache()
+        try:
+            # Not always available on all builds, but helps when present
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
         torch.cuda.synchronize()
 
         if verbose:
-            allocated = torch.cuda.memory_allocated() / 1e9
-            total = torch.cuda.get_device_properties(0).total_memory / 1e9
-            free = total - allocated
-            logger.info(f"[Memory Cleanup{f' - {reason}' if reason else ''}] "
-                       f"{allocated:.1f}GB used, {free:.1f}GB free")
+            allocated = torch.cuda.memory_allocated()
+            reserved = torch.cuda.memory_reserved()
+            total = torch.cuda.get_device_properties(0).total_memory
+            freed_alloc = max(0, (allocated_before - allocated) / 1e9)
+            freed_res = max(0, (reserved_before - reserved) / 1e9)
+            used_gb = allocated / 1e9
+            free_gb = (total - allocated) / 1e9
+            logger.info(
+                f"[Memory Cleanup{f' - {reason}' if reason else ''}] "
+                f"{used_gb:.1f}GB used, {free_gb:.1f}GB free (freed {freed_alloc:.2f}GB alloc, {freed_res:.2f}GB reserved)"
+            )
+
+def _approx_live_grad_bytes(model: Optional[torch.nn.Module]) -> int:
+    """Estimate bytes held by parameter .grad tensors that are still live on GPU."""
+    if model is None or not torch.cuda.is_available():
+        return 0
+    total = 0
+    try:
+        for p in model.parameters():
+            g = getattr(p, 'grad', None)
+            if g is not None and g.is_cuda:
+                total += g.numel() * g.element_size()
+    except Exception:
+        pass
+    return total
 
 # ============================================================================
 # SIMPLE ERROR HANDLING RULE
@@ -2501,7 +2541,9 @@ class MetricRegistry:
             if hasattr(self, '_parent_analyzer') and hasattr(self._parent_analyzer, 'baseline_gpu_memory'):
                 leak_threshold = self._parent_analyzer.baseline_gpu_memory
             
-            if allocated_before > leak_threshold:
+            # Treat as a leak only if both allocated AND reserved exceed baseline by a margin
+            leak_margin_gb = 0.5  # small tolerance above baseline
+            if (allocated_before - leak_threshold) > leak_margin_gb or (reserved_before - leak_threshold) > 0:
                 logger.error(f"⚠️ MEMORY LEAK DETECTED before metric '{metric_name}'")
                 logger.error(f"   GPU Memory: {allocated_before:.2f}GB allocated / {reserved_before:.2f}GB reserved")
                 logger.error(f"   Baseline (model + overhead): {leak_threshold:.2f}GB")
@@ -2509,22 +2551,38 @@ class MetricRegistry:
                 logger.error(f"   Previous metric likely failed to clean up properly")
                 logger.error(f"   Attempting aggressive cleanup...")
 
-                # Force aggressive cleanup
+                # Force aggressive cleanup: clear model grads, then caches
                 import gc
+                model_for_cleanup = context.models[0] if context.models else None
+                if model_for_cleanup is not None and hasattr(model_for_cleanup, 'zero_grad'):
+                    try:
+                        model_for_cleanup.zero_grad(set_to_none=True)
+                        for p in model_for_cleanup.parameters():
+                            p.grad = None
+                    except Exception as e:
+                        logger.debug(f"Leak cleanup: failed to clear grads: {e}")
+                    # Heuristic: estimate how much memory is tied up in .grad tensors
+                    grad_bytes = _approx_live_grad_bytes(model_for_cleanup)
+                    if grad_bytes > 0:
+                        logger.info(f"   Detected ~{grad_bytes/1e9:.2f}GB in live .grad tensors; cleared via set_to_none")
                 gc.collect()
                 torch.cuda.synchronize()
-                cleanup_memory(verbose=False, reason=f"leak recovery before {metric_name}")
+                cleanup_memory(verbose=False, reason=f"leak recovery before {metric_name}", model=model_for_cleanup)
 
                 # Check if cleanup helped
                 allocated_after = torch.cuda.memory_allocated() / (1024**3)
-                freed_gb = allocated_before - allocated_after
-                logger.info(f"   ✓ Freed {freed_gb:.2f}GB, now at {allocated_after:.2f}GB")
+                reserved_after = torch.cuda.memory_reserved() / (1024**3)
+                freed_alloc_gb = max(0.0, allocated_before - allocated_after)
+                freed_res_gb = max(0.0, reserved_before - reserved_after)
+                logger.info(f"   ✓ Freed {freed_alloc_gb:.2f}GB alloc / {freed_res_gb:.2f}GB reserved; now at {allocated_after:.2f}GB alloc, {reserved_after:.2f}GB reserved")
 
-                if allocated_after > leak_threshold:
-                    logger.warning(f"   ⚠️ Still {allocated_after:.2f}GB allocated after cleanup ({allocated_after - leak_threshold:.2f}GB over baseline)")
+                if (allocated_after - leak_threshold) > leak_margin_gb or (reserved_after - leak_threshold) > 0:
+                    logger.warning(f"   ⚠️ Still {allocated_after:.2f}GB allocated / {reserved_after:.2f}GB reserved after cleanup ({max(0.0, allocated_after - leak_threshold):.2f}GB over baseline)")
                     logger.warning(f"   This metric may fail due to insufficient GPU memory")
 
-        cleanup_memory(verbose=False, reason=f"before {metric_name}")
+        # Final pre-metric cleanup (reports freed reserved/allocated if verbose)
+        model_for_cleanup = context.models[0] if context.models else None
+        cleanup_memory(verbose=False, reason=f"before {metric_name}", model=model_for_cleanup)
 
         # Compute metric based on signature type
         metric_details = f"[{model_id}]" if model_id else ""
@@ -2563,7 +2621,7 @@ class MetricRegistry:
 
                     # Clear gradients after computation for memory efficiency
                     if hasattr(model, 'zero_grad'):
-                        model.zero_grad()
+                        model.zero_grad(set_to_none=True)
             elif model and not requires_gradients:
                 # Use no_grad context for metrics that don't need gradients
                 with self.gradient_computation_manager.gradient_context(
@@ -2726,13 +2784,16 @@ class MetricRegistry:
                 # Clear gradients if model exists
                 if hasattr(model, 'zero_grad'):
                     model.zero_grad(set_to_none=True)  # set_to_none=True frees memory faster
+                    # Ensure any lingering .grad tensors are released
+                    for p in model.parameters():
+                        p.grad = None
 
             # Note: EstablishedAnalysisMethods cleans up automatically in comprehensive_analysis()
             # No manual cleanup needed for established module
 
             # Force garbage collection and CUDA cache cleanup
             # This ensures metrics don't accumulate memory across runs
-            cleanup_memory()
+            cleanup_memory(model=model)
 
     def _validate_context(self, metric_info: Dict, context: MetricContext) -> bool:
         """Validate that context has required inputs for the metric."""
@@ -3271,9 +3332,11 @@ class MetricRegistry:
                             device_batch[key] = value.to(original_device)
                         else:
                             device_batch[key] = value
-                    outputs = model(**device_batch)
+                    # CRITICAL: Request hidden_states output for activation extraction
+                    outputs = model(**device_batch, output_hidden_states=True)
                 else:
-                    outputs = model(**batch)
+                    # CRITICAL: Request hidden_states output for activation extraction
+                    outputs = model(**batch, output_hidden_states=True)
 
                 # Extract final hidden states for sparsity analysis
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
@@ -3324,7 +3387,8 @@ class MetricRegistry:
                     else:
                         mini_batch[key] = value
 
-                outputs = model(**mini_batch)
+                # CRITICAL: Request hidden_states output for activation extraction
+                outputs = model(**mini_batch, output_hidden_states=True)
 
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
                     if preserve_gradients:
