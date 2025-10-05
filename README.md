@@ -90,74 +90,26 @@ conflicts = metrics.analyze_ties_conflicts({'math': math_model, 'code': code_mod
 <details>
 <summary><b>What metrics are included? (Click to expand 80+ metrics)</b></summary>
 
-### Optimization & Curvature
-- Fisher eigenvalues (Lanczos), Hessian eigenvalues (Lanczos)
-- Spectrum comparison, loss barrier, mode connectivity
-- Loss landscape (2D), directional losses
-- SAM sharpness, K‑FAC natural gradient
-Docs: [Fisher Lanczos](docs/FISHER_EIGENVALUES_LANCZOS_DOCUMENTATION.md) • [SAM](docs/SAM_SHARPNESS_DOCUMENTATION.md) • [Loss Landscape](docs/LOSS_LANDSCAPE_2D_DOCUMENTATION.md)
+Representative highlights (full catalog in maindocs/METRICS_CATALOG.md):
 
-### Fisher Information
-- Group Fisher (Welford and EMA), one‑shot Fisher
-- Fisher overlap, task similarity, Fisher‑weighted merge, scale‑by‑Fisher
-- Fisher importance, Fisher pruning masks, top Fisher directions
-- Fisher uncertainty (variance/CI), update_fisher_ema
-- Compare task Fisher, find intervention vectors
+- Optimization & Curvature: Fisher/Hessian eigenvalues (Lanczos), loss landscape 2D, mode connectivity
+- Fisher: Group Fisher (Welford/EMA), Fisher overlap, Fisher importance + pruning masks
+- Gradients: Gradient pathology, PCGrad conflict, layer gradient alignment
+- Attribution & Influence: TracIn, integrated gradients, causal necessity
+- Attention & Circuits: Induction heads, QK‑OV pairing, attention entropy
+- Representation & Geometry: CKA/RSA similarity, effective rank, superposition analysis
+- Embeddings & Manifolds: Embedding singularities (Robinson), fiber bundle test
+- Information Theory & Dynamics: Information flow, compression ratio, plasticity index
+- Lottery & Pruning: Early Bird tickets, iterative magnitude pruning, ticket overlap
+- Modularity & Architecture: Fisher‑weighted damage, damage asymmetry, OV→U
 
-### Gradients & Training
-- Gradient pathology (vanishing/exploding), gradient SNR
-- Raw gradient conflict (single‑scale and multi‑scale)
-- PCGrad conflict (single‑scale and multi‑scale)
-- Layer gradient alignment (single‑scale and multi‑scale)
-- Gradient conflict pairs (single‑scale and multi‑scale)
-- Gradient alignment trajectory (across models/runs)
-
-### Attribution & Influence
-- TracIn self‑influence, find critical samples
-- Integrated gradients, attention attribution, causal necessity
-- Analyze ties/conflicts, extract task vectors
-Docs: [TracIn](docs/TRACIN_DOCUMENTATION.md) • [Attention Attribution](docs/ATTENTION_ATTRIBUTION_DOCUMENTATION.md)
-
-### Attention & Circuits
-- Induction head strength, QK‑OV pairing
-- Attention head specialization, attention flow patterns
-- Attention entropy, attention drift, attention concentration
-- Logit lens
-
-### Representation & Geometry
-- CKA/RSA similarity, block CKA gap
-- Effective rank, full effective rank
-- Superposition: vector interference, feature frequency distribution
-- Superposition: strength, dimensional scaling, feature sparsity
-- Superposition: representation capacity, feature emergence
-- Comprehensive superposition analysis, superposition trajectory, analyze model superposition
-Docs: [Manifold Metrics](docs/MANIFOLD_METRICS_DOCUMENTATION.md)
-
-### Embeddings & Manifolds
-- Embedding singularities (Robinson), singularity report
-- Manifold metrics, Robinson fiber bundle hypothesis test
-
-### Information Theory & Dynamics
-- Signal propagation, signal propagation stability
-- Information flow, plasticity index, alignment fragility
-- Practical compression ratio (int8+zlib), parameter storage bits
-- Layer mutual information, heuristic PID/MINMI, variational IB probe
-- Analyze training dynamics, model behavior scales
-Docs: [MDL](docs/MDL_COMPLEXITY_IMPLEMENTATION.md) • [PID/MINMI](docs/HEURISTIC_PID_MINMI_DOCUMENTATION.md)
-
-### Lottery Tickets & Pruning
-- Pruning robustness, layerwise magnitude tickets
-- Gradient importance, Fisher importance, Early Bird tickets
-- Lottery ticket quality, ticket overlap
-- Iterative magnitude pruning (IMP)
-Docs: [Lottery Tickets](docs/LOTTERY_TICKETS_DOCUMENTATION.md)
-
-### Modularity & Architecture
-- Memory‑efficient OVU
-- Fisher‑weighted damage, damage asymmetry
-- SAM sharpness (architecture‑aware)
-
-**Total:** 80+ metrics with statistical testing (p‑values, confidence intervals, FDR correction).
+See also docs for selected methods:
+- Fisher Lanczos: docs/FISHER_EIGENVALUES_LANCZOS_DOCUMENTATION.md
+- SAM sharpness: docs/SAM_SHARPNESS_DOCUMENTATION.md
+- Loss landscape: docs/LOSS_LANDSCAPE_2D_DOCUMENTATION.md
+- TracIn: docs/TRACIN_DOCUMENTATION.md
+- Manifold metrics: docs/MANIFOLD_METRICS_DOCUMENTATION.md
+- MDL/PID: docs/MDL_COMPLEXITY_IMPLEMENTATION.md, docs/HEURISTIC_PID_MINMI_DOCUMENTATION.md
 
 </details>
 
@@ -191,22 +143,6 @@ Docs: [Lottery Tickets](docs/LOTTERY_TICKETS_DOCUMENTATION.md)
 
 ---
 
-## 🧠 For Neuroscience & Cognitive Science Researchers
-
-**Are you comparing neural networks to brain recordings?** TensorScope provides unified analysis of model internals (Fisher, geometry, circuits) in the same framework you use for neural data (RDMs, regression, manifolds).
-
-**Research questions you can answer:**
-- Does your model's representational geometry (CKA/RSA) match neural recordings?
-- Which layers best predict neural/behavioral responses?
-- How does superposition in models compare to polysemanticity in biological neurons?
-- Do attention circuits correspond to compositional structure in neural circuits?
-- How does geometric structure relate to category separability and invariance?
-
-**[→ Complete Neuroscience Applications Guide](maindocs/NEUROSCIENCE_APPLICATIONS.md)**
-
-Includes: Brain-Score style benchmarking • Neural predictivity workflows • Cross-species comparison • Integration with RSA Toolbox, Brain-Score, and NMA tools
-
----
 
  
 
