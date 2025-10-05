@@ -153,7 +153,7 @@ class KFACNaturalGradient:
         self.use_gpu_eigh = use_gpu_eigh
         self.show_progress = show_progress
         # Storage
-        self.kfac_factors = {}  # {layer_name: {'A': activation_cov, 'G': gradient_cov}}
+        self.kfac_factors = {}  # {layer_name: {'A_eigvecs', 'A_eigvals', 'G_eigvecs', 'G_eigvals'}}
         self.diagonal_fisher = {}  # Fallback diagonal Fisher
         self.update_count = 0
         self.inv_cache = {}  # Cache inverted factors
@@ -428,33 +428,49 @@ class KFACNaturalGradient:
 
                     # Apply eigenvalue correction for numerical stability
                     if self.use_eigenvalue_correction:
-                        A = self._stabilize_matrix(A, name + "_A", damping=self.damping_A)
-                        G = self._stabilize_matrix(G, name + "_G", damping=self.damping_G)
+                        A_decomp = self._stabilize_matrix(A, name + "_A", damping=self.damping_A)
+                        G_decomp = self._stabilize_matrix(G, name + "_G", damping=self.damping_G)
+                        
+                        # Update with EMA in eigenspace (more efficient than reconstructing)
+                        if name in self.kfac_factors and 'A_eigvals' in self.kfac_factors[name]:
+                            # EMA update in decomposed form
+                            old_A_eigvals = self.kfac_factors[name]['A_eigvals']
+                            old_G_eigvals = self.kfac_factors[name]['G_eigvals']
+                            
+                            # Simple EMA on eigenvalues (eigenvectors change slowly, so we update less frequently)
+                            A_eigvals_updated = self.ema_decay * old_A_eigvals + (1 - self.ema_decay) * A_decomp['eigvals']
+                            G_eigvals_updated = self.ema_decay * old_G_eigvals + (1 - self.ema_decay) * G_decomp['eigvals']
+                            
+                            # Store updated decomposition
+                            self.kfac_factors[name] = {
+                                'A_eigvecs': A_decomp['eigvecs'],  # Update eigenvectors each time
+                                'A_eigvals': A_eigvals_updated,
+                                'G_eigvecs': G_decomp['eigvecs'],
+                                'G_eigvals': G_eigvals_updated
+                            }
                     else:
-                        # Simple damping with separate factors
-                        A = A + self.damping_A * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
-                        G = G + self.damping_G * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
-
-                    # Update with EMA, then move to CPU to free GPU memory
-                    if name in self.kfac_factors:
-                        old_A = self.kfac_factors[name]['A']
-                        old_G = self.kfac_factors[name]['G']
-
-                        # Move old factors back to device for EMA computation
-                        old_A = old_A.to(A.device)
-                        old_G = old_G.to(G.device)
-
-                        A_updated = self.ema_decay * old_A + (1 - self.ema_decay) * A
-                        G_updated = self.ema_decay * old_G + (1 - self.ema_decay) * G
-
-                        # Move to CPU immediately to free GPU memory
-                        self.kfac_factors[name]['A'] = A_updated.cpu().float()
-                        self.kfac_factors[name]['G'] = G_updated.cpu().float()
+                            # First time: store decomposition directly
+                            self.kfac_factors[name] = {
+                                'A_eigvecs': A_decomp['eigvecs'],
+                                'A_eigvals': A_decomp['eigvals'],
+                                'G_eigvecs': G_decomp['eigvecs'],
+                                'G_eigvals': G_decomp['eigvals']
+                            }
                     else:
-                        # Move to CPU immediately to free GPU memory
-                        self.kfac_factors[name] = {'A': A.cpu().float(), 'G': G.cpu().float()}
-
-                        # Clear inverse cache for this layer
+                        # Simple damping without eigenvalue correction
+                        A_damped = A + self.damping_A * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
+                        G_damped = G + self.damping_G * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
+                        
+                        # Still store as decomposition for consistency (identity eigenvectors)
+                        n_A, n_G = A.shape[0], G.shape[0]
+                        self.kfac_factors[name] = {
+                            'A_eigvecs': torch.eye(n_A, dtype=torch.float32),
+                            'A_eigvals': torch.full((n_A,), self.damping_A, dtype=torch.float32),
+                            'G_eigvecs': torch.eye(n_G, dtype=torch.float32),
+                            'G_eigvals': torch.full((n_G,), self.damping_G, dtype=torch.float32)
+                        }
+                    
+                    # Clear inverse cache for this layer (decomposition has changed)
                         if name in self.inv_cache:
                             del self.inv_cache[name]
 
@@ -503,17 +519,14 @@ class KFACNaturalGradient:
 
         return self.kfac_factors
 
-    def _stabilize_matrix(self, M: torch.Tensor, name: str = "", damping: Optional[float] = None) -> torch.Tensor:
+    def _stabilize_matrix(self, M: torch.Tensor, name: str = "", damping: Optional[float] = None) -> Dict[str, torch.Tensor]:
         """
         Stabilise a covariance matrix by enforcing a bounded condition number.
 
         This follows the standard K-FAC recipe (Martens & Grosse, 2015): compute an
-        eigendecomposition, clip small eigenvalues to maintain a maximum condition
-        number, then reconstruct the matrix. The routine always aims to run the
-        eigendecomposition on GPU for speed, but deterministically falls back to CPU
-        if the matrix would exceed available device memory. The final fallback is
-        simple diagonal damping, which keeps the pipeline alive even when numerical
-        issues prevent a full decomposition.
+        eigendecomposition and clip small eigenvalues to maintain a maximum condition
+        number. Instead of reconstructing the full matrix, we return the eigendecomposition
+        directly, which is more memory-efficient and avoids redundant decomposition later.
 
         Args:
             M: Symmetric positive semidefinite matrix to stabilise.
@@ -521,21 +534,22 @@ class KFACNaturalGradient:
             damping: Minimum eigenvalue threshold (defaults to ``self.damping``).
 
         Returns:
-            A stabilised matrix with condition number ≤ ``self.max_condition_number``.
+            Dictionary with 'eigvecs' and 'eigvals' (both on CPU, float32).
+            The stabilized matrix can be reconstructed as: eigvecs @ diag(eigvals) @ eigvecs.T
         """
         if damping is None:
             damping = self.damping
 
-        orig_device = M.device
-        orig_dtype = M.dtype
+            orig_device = M.device
+            orig_dtype = M.dtype
 
         # Work in float32 for numerical stability (common practice in K-FAC codebases).
-        M_work = M.to(torch.float32)
+            M_work = M.to(torch.float32)
 
         # Decide where to run the eigendecomposition. We prefer the original CUDA device
         # when available, but fall back to CPU if the matrix is likely to exceed memory.
-        if self.use_gpu_eigh and orig_device.type == 'cuda' and torch.cuda.is_available():
-            device_eigh = orig_device
+            if self.use_gpu_eigh and orig_device.type == 'cuda' and torch.cuda.is_available():
+                device_eigh = orig_device
 
             # Memory check: the cuSOLVER eigen routines need the input matrix plus ~3×
             # workspace. If we cannot secure a 50% headroom, fall back to CPU to avoid OOM.
@@ -558,13 +572,13 @@ class KFACNaturalGradient:
                 # If memory info is unavailable, err on the safe side for very large matrices.
                 if M_work.shape[0] > 8192:
                     device_eigh = torch.device('cpu')
-        else:
-            device_eigh = torch.device('cpu')
+            else:
+                device_eigh = torch.device('cpu')
 
-        M_work = M_work.to(device_eigh)
+            M_work = M_work.to(device_eigh)
 
-        try:
-            eigvals, eigvecs = torch.linalg.eigh(M_work)
+            try:
+                eigvals, eigvecs = torch.linalg.eigh(M_work)
         except RuntimeError as err:
             if device_eigh.type == 'cuda' and 'out of memory' in str(err).lower():
                 logger.warning(
@@ -575,8 +589,8 @@ class KFACNaturalGradient:
                 torch.cuda.empty_cache()
                 M_work = M_work.cpu()
                 eigvals, eigvecs = torch.linalg.eigh(M_work)
-            else:
-                raise
+                else:
+                    raise
 
         try:
             max_eig = eigvals.max()
@@ -586,35 +600,26 @@ class KFACNaturalGradient:
             )
             eigvals_clipped = torch.clamp(eigvals, min=min_allowed)
 
-            # Reconstruct the stabilised matrix: Q diag(λ_clipped) Q^T.
-            # MEMORY FIX: Move eigenvectors to CPU before reconstruction to avoid GPU OOM
-            # The reconstruction M_stable = Q Λ Q^T can be done on CPU without affecting
-            # theoretical correctness, then moved back to GPU for subsequent operations.
-            if eigvecs.device.type == 'cuda':
-                # Free GPU memory by moving to CPU for reconstruction
-                eigvecs_cpu = eigvecs.cpu()
-                eigvals_clipped_cpu = eigvals_clipped.cpu()
-                del eigvecs, eigvals_clipped
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                # Reconstruct on CPU
-                M_stable = (eigvecs_cpu * eigvals_clipped_cpu.unsqueeze(0)) @ eigvecs_cpu.t()
-                del eigvecs_cpu, eigvals_clipped_cpu
-            else:
-                # Already on CPU, proceed normally
-                M_stable = (eigvecs * eigvals_clipped.unsqueeze(0)) @ eigvecs.t()
-            
-            return M_stable.to(orig_device, dtype=orig_dtype)
+            # MEMORY OPTIMIZATION: Return eigendecomposition directly instead of reconstructing.
+            # This avoids the expensive Q Λ Q^T reconstruction and subsequent re-decomposition.
+            # The natural gradient computation already applies the preconditioner in the eigenbasis.
+            return {
+                'eigvecs': eigvecs.cpu().float(),
+                'eigvals': eigvals_clipped.cpu().float()
+            }
         except Exception as err:
             logger.error(
-                "K-FAC eigenvalue correction failed for %s (shape=%s): %s; applying diagonal damping",
+                "K-FAC eigenvalue correction failed for %s (shape=%s): %s; falling back to diagonal damping",
                 name,
                 tuple(M.shape),
                 err,
             )
-            eye = torch.eye(M.shape[0], device=orig_device, dtype=orig_dtype)
-            return M + damping * eye
+            # Fallback: return identity eigenvectors with damped eigenvalues
+            n = M.shape[0]
+            return {
+                'eigvecs': torch.eye(n, dtype=torch.float32),
+                'eigvals': torch.full((n,), damping, dtype=torch.float32)
+            }
 
 
     def compute_natural_gradient(
@@ -705,56 +710,33 @@ class KFACNaturalGradient:
         """
         result = {}
 
-        # Get factors (stored on CPU, move to gradient device for computation)
-        A = self.kfac_factors[layer_name]['A']
-        G = self.kfac_factors[layer_name]['G']
+        # Get decomposed factors (stored on CPU)
+        factors = self.kfac_factors[layer_name]
+        A_eigvecs = factors['A_eigvecs']
+        A_eigvals = factors['A_eigvals']
+        G_eigvecs = factors['G_eigvecs']
+        G_eigvals = factors['G_eigvals']
         
         # Determine target device from gradients
         weight_name = f"{layer_name}.weight" if layer_name else "weight"
         if weight_name in gradients:
             target_device = gradients[weight_name].device
-            A = A.to(target_device)
-            G = G.to(target_device)
+            # Move decomposition to gradient device
+            A_eigvecs = A_eigvecs.to(target_device)
+            A_eigvals = A_eigvals.to(target_device)
+            G_eigvecs = G_eigvecs.to(target_device)
+            G_eigvals = G_eigvals.to(target_device)
+        else:
+            target_device = torch.device('cpu')
 
-        # Get or compute inverses - prefer Cholesky solve over explicit inverse
+        # Cache the decomposition on the target device (no need to recompute!)
         if layer_name not in self.inv_cache:
-            try:
-                # Try Cholesky decomposition first for better numerical stability
-                L_A = torch.linalg.cholesky(A)
-                L_G = torch.linalg.cholesky(G)
-                # Store Cholesky factors instead of inverses
                 self.inv_cache[layer_name] = {
-                    'L_A': L_A,
-                    'L_G': L_G,
-                    'use_cholesky': True
-                }
-            except:
-                # Fallback to eigendecomposition for non-positive definite matrices
-                try:
-                    eigvals_A, eigvecs_A = torch.linalg.eigh(A)
-                    eigvals_G, eigvecs_G = torch.linalg.eigh(G)
-
-                    # Regularize small eigenvalues
-                    eigvals_A = torch.clamp(eigvals_A, min=self.damping_A)
-                    eigvals_G = torch.clamp(eigvals_G, min=self.damping_G)
-
-                    self.inv_cache[layer_name] = {
-                        'eigvals_A': eigvals_A,
-                        'eigvecs_A': eigvecs_A,
-                        'eigvals_G': eigvals_G,
-                        'eigvecs_G': eigvecs_G,
+                'eigvals_A': A_eigvals,
+                'eigvecs_A': A_eigvecs,
+                'eigvals_G': G_eigvals,
+                'eigvecs_G': G_eigvecs,
                         'use_cholesky': False
-                    }
-                except Exception as e:
-                    logger.warning(f"Matrix decomposition failed for {layer_name}: {e}")
-                    # Last resort: pseudo-inverse
-                    A_inv = torch.linalg.pinv(A)
-                    G_inv = torch.linalg.pinv(G)
-                    self.inv_cache[layer_name] = {
-                        'A_inv': A_inv,
-                        'G_inv': G_inv,
-                        'use_cholesky': False,
-                        'use_pinv': True
                     }
 
         cache = self.inv_cache[layer_name]
@@ -926,29 +908,33 @@ class KFACNaturalGradient:
                 continue
 
             if name in self.kfac_factors:
-                # Get factors (stored on CPU) and move to gradient device
-                A = self.kfac_factors[name]['A']
-                G = self.kfac_factors[name]['G']
+                # Get decomposed factors (already stored in eigenspace)
+                factors = self.kfac_factors[name]
+                A_eigvecs = factors['A_eigvecs']
+                A_eigvals = factors['A_eigvals']
+                G_eigvecs = factors['G_eigvecs']
+                G_eigvals = factors['G_eigvals']
                 
                 # Determine target device from gradients
                 weight_name = f"{name}.weight" if name else "weight"
                 if weight_name in gradients:
                     target_device = gradients[weight_name].device
-                    A = A.to(target_device)
-                    G = G.to(target_device)
+                    A_eigvecs = A_eigvecs.to(target_device)
+                    A_eigvals = A_eigvals.to(target_device)
+                    G_eigvecs = G_eigvecs.to(target_device)
+                    G_eigvals = G_eigvals.to(target_device)
+                else:
+                    target_device = torch.device('cpu')
 
-                # Eigendecomposition for powered scaling
+                # Apply power scaling directly to eigenvalues (no need to decompose again!)
                 try:
-                    eigvals_A, eigvecs_A = torch.linalg.eigh(A)
-                    eigvals_G, eigvecs_G = torch.linalg.eigh(G)
-
                     # Apply power with separate damping
-                    eigvals_A = (eigvals_A + self.damping_A) ** power
-                    eigvals_G = (eigvals_G + self.damping_G) ** power
+                    eigvals_A_power = (A_eigvals + self.damping_A) ** power
+                    eigvals_G_power = (G_eigvals + self.damping_G) ** power
 
                     # Reconstruct powered matrices
-                    A_power = eigvecs_A @ torch.diag(eigvals_A) @ eigvecs_A.t()
-                    G_power = eigvecs_G @ torch.diag(eigvals_G) @ eigvecs_G.t()
+                    A_power = A_eigvecs @ torch.diag(eigvals_A_power) @ A_eigvecs.t()
+                    G_power = G_eigvecs @ torch.diag(eigvals_G_power) @ G_eigvecs.t()
 
                     # Get gradient names
                     weight_name = f"{name}.weight" if name else "weight"
@@ -1019,19 +1005,28 @@ class KFACNaturalGradient:
         fvp = {}
 
         for layer_name, factors in self.kfac_factors.items():
-            # Get factors (stored on CPU) and move to vector device
-            A = factors['A']
-            G = factors['G']
+            # Get decomposed factors (stored on CPU) and reconstruct on target device
+            A_eigvecs = factors['A_eigvecs']
+            A_eigvals = factors['A_eigvals']
+            G_eigvecs = factors['G_eigvecs']
+            G_eigvals = factors['G_eigvals']
             
             # Determine target device from vector
             weight_name = f"{layer_name}.weight" if layer_name else "weight"
             if weight_name in vector:
                 target_device = vector[weight_name].device
-                A = A.to(target_device)
-                G = G.to(target_device)
+                A_eigvecs = A_eigvecs.to(target_device)
+                A_eigvals = A_eigvals.to(target_device)
+                G_eigvecs = G_eigvecs.to(target_device)
+                G_eigvals = G_eigvals.to(target_device)
+                
+                # Reconstruct matrices (only when needed for FVP)
+                A = A_eigvecs @ torch.diag(A_eigvals) @ A_eigvecs.t()
+                G = G_eigvecs @ torch.diag(G_eigvals) @ G_eigvecs.t()
+            else:
+                continue
 
             # Get vector components
-            weight_name = f"{layer_name}.weight" if layer_name else "weight"
             bias_name = f"{layer_name}.bias" if layer_name else "bias"
 
             if weight_name in vector:

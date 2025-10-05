@@ -714,9 +714,21 @@ class KFACFisherOperator(LinOp):
 
                 if layer_name and layer_name in self.kfac_factors:
                     factors = self.kfac_factors[layer_name]
-                    # Factors stored on CPU, move to vector device for computation
-                    A = factors['A'].to(vi.device)
-                    G = factors['G'].to(vi.device)
+                    
+                    # Check if factors are in new decomposed format or old full matrix format
+                    if 'A_eigvecs' in factors:
+                        # New decomposed format: reconstruct matrices on target device
+                        A_eigvecs = factors['A_eigvecs'].to(vi.device)
+                        A_eigvals = factors['A_eigvals'].to(vi.device)
+                        G_eigvecs = factors['G_eigvecs'].to(vi.device)
+                        G_eigvals = factors['G_eigvals'].to(vi.device)
+                        
+                        A = A_eigvecs @ torch.diag(A_eigvals) @ A_eigvecs.t()
+                        G = G_eigvecs @ torch.diag(G_eigvals) @ G_eigvecs.t()
+                    else:
+                        # Old full matrix format (backward compatibility)
+                        A = factors['A'].to(vi.device)
+                        G = factors['G'].to(vi.device)
 
                     if 'weight' in param_name and param.ndim == 2:
                         # For weight: F*v ≈ G*v*A
