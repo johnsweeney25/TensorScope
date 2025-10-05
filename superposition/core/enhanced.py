@@ -25,6 +25,7 @@ from functools import lru_cache
 # Safe tqdm import with fallback
 try:
     from tqdm.auto import tqdm
+    from tqdm.contrib.logging import logging_redirect_tqdm  # optional
 except (ImportError, RuntimeError):
     # Fallback no-op implementation
     class tqdm:
@@ -41,6 +42,7 @@ except (ImportError, RuntimeError):
         def close(self):
             pass
 import logging
+import sys
 import gc
 
 logger = logging.getLogger(__name__)
@@ -162,7 +164,8 @@ class SuperpositionMetrics:
         batch_size: Optional[int] = None,
         exclude_diagonal: bool = True,
         return_full_matrix: bool = False,
-        return_norms: bool = False
+        return_norms: bool = False,
+        show_progress: bool = True
     ) -> Dict[str, Any]:
         """
         Measure interference between feature vectors with improved numerical stability.
@@ -255,7 +258,9 @@ class SuperpositionMetrics:
 
             # Compute overlaps
             if n_features > batch_size:
-                result = self._compute_batched_interference(weight_matrix, batch_size, exclude_diagonal)
+                result = self._compute_batched_interference(
+                    weight_matrix, batch_size, exclude_diagonal, show_progress=show_progress
+                )
             else:
                 result = self._compute_full_interference(weight_matrix, exclude_diagonal, return_full_matrix, normalize)
 
@@ -297,7 +302,8 @@ class SuperpositionMetrics:
         self,
         weight_matrix: torch.Tensor,
         batch_size: int,
-        exclude_diagonal: bool
+        exclude_diagonal: bool,
+        show_progress: bool = True
     ) -> Dict[str, Any]:
         """Compute interference in batches for memory efficiency."""
         n_features = weight_matrix.shape[0]
@@ -325,7 +331,11 @@ class SuperpositionMetrics:
             total=total_batch_pairs,
             desc=f"Computing interference ({n_features:,} features)",
             unit="batch_pairs",
-            leave=False
+            leave=False,
+            dynamic_ncols=True,
+            mininterval=0.5,
+            file=sys.stderr,
+            disable=not show_progress
         )
 
         batch_count = 0
@@ -339,11 +349,15 @@ class SuperpositionMetrics:
 
                 # Update progress bar
                 batch_count += 1
-                batch_iterator.update(1)
-                batch_iterator.set_postfix({
-                    'pairs': f"{n_pairs:,}",
-                    'max': f"{max_overlap:.4f}" if n_pairs > 0 else "0.0000"
-                })
+                try:
+                    batch_iterator.update(1)
+                    if show_progress:
+                        batch_iterator.set_postfix({
+                            'pairs': f"{n_pairs:,}",
+                            'max': f"{max_overlap:.4f}" if n_pairs > 0 else "0.0000"
+                        })
+                except Exception:
+                    pass
 
                 # Compute batch overlaps
                 batch_overlaps = torch.matmul(W_i, W_j.T).abs()

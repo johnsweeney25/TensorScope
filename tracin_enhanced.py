@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
 import logging
 from tqdm import tqdm
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class TracInEnhanced:
             test_gradients.append(test_grad)
             
         # Compute gradients for training samples and calculate influence
-        for j in tqdm(range(train_size), desc="Computing training gradients"):
+        for j in tqdm(range(train_size), desc="Computing training gradients", leave=False, file=sys.stderr):
             # Get single training sample
             train_input = {
                 'input_ids': train_batch['input_ids'][j:j+1],

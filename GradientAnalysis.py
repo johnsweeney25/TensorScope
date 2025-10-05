@@ -650,7 +650,8 @@ class GradientAnalysis:
         absolute_exploding_threshold: float = 100.0,
         memory_efficient: bool = False,
         use_natural_gradient: bool = False,
-        kfac_factors: Optional[Dict] = None
+        kfac_factors: Optional[Dict] = None,
+        show_progress: bool = True
     ) -> Dict[str, Any]:
         """
         Improved gradient pathology detection with theoretically sound metrics.
@@ -813,8 +814,14 @@ class GradientAnalysis:
             gradient_accumulator = None
 
         # Add progress bar for batch processing
-        with logging_redirect_tqdm():
-            for batch_idx, current_batch in enumerate(tqdm(batches, desc="Computing gradient pathology", leave=False, file=sys.stderr)):
+        from contextlib import nullcontext
+        cm = logging_redirect_tqdm() if show_progress else nullcontext()
+        with cm:
+            for batch_idx, current_batch in enumerate(tqdm(batches,
+                                                          desc="Computing gradient pathology",
+                                                          leave=False,
+                                                          file=sys.stderr,
+                                                          disable=not show_progress)):
                 # Move batch to device
                 current_batch = self._to_model_device(model, current_batch)
                 current_batch = self._with_labels(current_batch)
@@ -890,8 +897,14 @@ class GradientAnalysis:
         # Analyze each parameter (with progress bar for many parameters)
         param_iterator = all_gradient_norms.items()
         if len(all_gradient_norms) > 100:
-            param_iterator = tqdm(param_iterator, desc="Analyzing parameters", total=len(all_gradient_norms), leave=False, file=sys.stderr)
-        with logging_redirect_tqdm():
+            param_iterator = tqdm(param_iterator,
+                                  desc="Analyzing parameters",
+                                  total=len(all_gradient_norms),
+                                  leave=False,
+                                  file=sys.stderr,
+                                  disable=not show_progress)
+        cm2 = logging_redirect_tqdm() if show_progress else nullcontext()
+        with cm2:
             for param_name, grad_norms in param_iterator:
                 mean_norm = np.mean(grad_norms)
                 std_norm = np.std(grad_norms) if len(grad_norms) > 1 else 0.0

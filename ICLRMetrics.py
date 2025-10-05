@@ -543,7 +543,7 @@ class ICLRMetrics:
         try:
             from tqdm import tqdm
             from tqdm.contrib.logging import logging_redirect_tqdm
-            iterator = tqdm(enumerate(alphas), total=len(alphas), desc="Computing loss barrier", file=sys.stderr)
+iterator = tqdm(enumerate(alphas), total=len(alphas), desc="Computing loss barrier", file=sys.stderr, leave=False, dynamic_ncols=True, mininterval=0.5)
             use_tqdm = True
         except ImportError:
             iterator = enumerate(alphas)

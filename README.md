@@ -34,22 +34,92 @@ results.generate_pdf_report("report.pdf")  # Includes comparison plots
 
 **Tested on 7B models. Most functionality working on 70B (full support in progress).**
 
+## Table of Contents
+- [Quick Start](#quick-start)
+- [From a Single Pass: Multi-Lens Analysis](#from-a-single-pass-multi-lens-analysis)
+- [Performance & Memory](#performance--memory)
+- [Metrics Catalog](#metrics-catalog)
+- [Examples](#examples)
+- [Installation](#installation)
+- [Troubleshooting & FAQ](#troubleshooting--faq)
+- [API Reference](#api-reference)
+- [Interpretation Guide](#interpretation-guide)
+- [Contributing](#contributing)
+- [Citation](#citation)
+
+## Metrics Catalog
+
 <details>
-<summary><b>📋 What metrics are included? (Click to expand 80+ metrics)</b></summary>
+<summary><b>What metrics are included? (Click to expand 80+ metrics)</b></summary>
 
-| Category | Metrics | Documentation |
-|----------|---------|---------------|
-| **Optimization & Curvature** | Fisher spectrum (Lanczos), Hessian eigenvalues, K-FAC natural gradient, SAM sharpness, mode connectivity, loss landscape 2D | [Fisher Lanczos](docs/FISHER_EIGENVALUES_LANCZOS_DOCUMENTATION.md) • [SAM](docs/SAM_SHARPNESS_DOCUMENTATION.md) • [Loss Landscape](docs/LOSS_LANDSCAPE_2D_DOCUMENTATION.md) |
-| **Fisher Information** | Group Fisher (Welford/EMA), one-shot Fisher, Fisher overlap, task similarity, sample conflicts (with p-values, effect sizes, FDR), Fisher importance, pruning masks | — |
-| **Gradients & Training** | Gradient pathology (vanishing/exploding), PCGrad conflicts, raw gradient conflict, layer alignment, alignment trajectory, dispersion/Gini, parameter-level conflicts | — |
-| **Attribution & Influence** | TracIn (enhanced with checkpoints), integrated gradients, attention attribution, causal necessity, sample influence analysis | [TracIn](docs/TRACIN_DOCUMENTATION.md) • [Attention Attribution](docs/ATTENTION_ATTRIBUTION_DOCUMENTATION.md) |
-| **Attention & Circuits** | Induction heads, QK-OV pairing, QKOV interference, attention entropy, memory-efficient OVU, attention flow patterns | — |
-| **Representation & Geometry** | Superposition regime, CKA similarity, effective rank, embedding singularities, Ricci curvature, manifold violations (fiber bundle test), tangent space analysis, token stability | [Manifold Metrics](docs/MANIFOLD_METRICS_DOCUMENTATION.md) |
-| **Information Theory** | MDL complexity, mutual information (PID, MINMI), plasticity index, compression ratios (int8+zlib), information flow | [MDL](docs/MDL_COMPLEXITY_IMPLEMENTATION.md) • [PID/MINMI](docs/HEURISTIC_PID_MINMI_DOCUMENTATION.md) |
-| **Lottery Tickets & Pruning** | Early Bird detection, IMP (Iterative Magnitude Pruning), winning ticket analysis, GGN verification, magnitude-based masks | [Lottery Tickets](docs/LOTTERY_TICKETS_DOCUMENTATION.md) |
-| **Modularity & Architecture** | Task damage asymmetry, Fisher-weighted damage, capacity metrics (trace, log-det, condition number), null space projection | — |
+### Optimization & Curvature
+- Fisher eigenvalues (Lanczos), Hessian eigenvalues (Lanczos)
+- Spectrum comparison, loss barrier, mode connectivity
+- Loss landscape (2D), directional losses
+- SAM sharpness, K‑FAC natural gradient
+Docs: [Fisher Lanczos](docs/FISHER_EIGENVALUES_LANCZOS_DOCUMENTATION.md) • [SAM](docs/SAM_SHARPNESS_DOCUMENTATION.md) • [Loss Landscape](docs/LOSS_LANDSCAPE_2D_DOCUMENTATION.md)
 
-**Total:** 80+ metrics computed in one run with automatic statistical testing (p-values, confidence intervals, FDR correction).
+### Fisher Information
+- Group Fisher (Welford and EMA), one‑shot Fisher
+- Fisher overlap, task similarity, Fisher‑weighted merge, scale‑by‑Fisher
+- Fisher importance, Fisher pruning masks, top Fisher directions
+- Fisher uncertainty (variance/CI), update_fisher_ema
+- Compare task Fisher, find intervention vectors
+
+### Gradients & Training
+- Gradient pathology (vanishing/exploding), gradient SNR
+- Raw gradient conflict (single‑scale and multi‑scale)
+- PCGrad conflict (single‑scale and multi‑scale)
+- Layer gradient alignment (single‑scale and multi‑scale)
+- Gradient conflict pairs (single‑scale and multi‑scale)
+- Gradient alignment trajectory (across models/runs)
+
+### Attribution & Influence
+- TracIn self‑influence, find critical samples
+- Integrated gradients, attention attribution, causal necessity
+- Analyze ties/conflicts, extract task vectors
+Docs: [TracIn](docs/TRACIN_DOCUMENTATION.md) • [Attention Attribution](docs/ATTENTION_ATTRIBUTION_DOCUMENTATION.md)
+
+### Attention & Circuits
+- Induction head strength, QK‑OV pairing
+- Attention head specialization, attention flow patterns
+- Attention entropy, attention drift, attention concentration
+- Logit lens
+
+### Representation & Geometry
+- CKA similarity, block CKA gap
+- Effective rank, full effective rank
+- Superposition: vector interference, feature frequency distribution
+- Superposition: strength, dimensional scaling, feature sparsity
+- Superposition: representation capacity, feature emergence
+- Comprehensive superposition analysis, superposition trajectory, analyze model superposition
+Docs: [Manifold Metrics](docs/MANIFOLD_METRICS_DOCUMENTATION.md)
+
+### Embeddings & Manifolds
+- Embedding singularities (Robinson), singularity report
+- Manifold metrics, Robinson fiber bundle hypothesis test
+
+### Information Theory & Dynamics
+- Signal propagation, signal propagation stability
+- Information flow, plasticity index, alignment fragility
+- Practical compression ratio (int8+zlib), parameter storage bits
+- Layer mutual information, heuristic PID/MINMI, variational IB probe
+- Analyze training dynamics, model behavior scales
+Docs: [MDL](docs/MDL_COMPLEXITY_IMPLEMENTATION.md) • [PID/MINMI](docs/HEURISTIC_PID_MINMI_DOCUMENTATION.md)
+
+### Lottery Tickets & Pruning
+- Pruning robustness, layerwise magnitude tickets
+- Gradient importance, Fisher importance, Early Bird tickets
+- Lottery ticket quality, ticket overlap
+- Iterative magnitude pruning (IMP)
+Docs: [Lottery Tickets](docs/LOTTERY_TICKETS_DOCUMENTATION.md)
+
+### Modularity & Architecture
+- Memory‑efficient OVU
+- Fisher‑weighted damage, damage asymmetry
+- SAM sharpness (architecture‑aware)
+
+**Total:** 80+ metrics with statistical testing (p‑values, confidence intervals, FDR correction).
 
 </details>
 
@@ -57,13 +127,31 @@ results.generate_pdf_report("report.pdf")  # Includes comparison plots
 
 ## From a Single Pass: Multi-Lens Analysis
 
-| **Optimization Theorist** | **Interpretability Researcher** | **Data Scientist** | **Representation Expert** |
-|:---|:---|:---|:---|
-| 📈 Full Fisher & Hessian spectrum | 🧠 QKOV & induction circuits | 👎 Sample conflicts (p-values, FDR) | 📐 Embedding singularities & manifold violations |
-| 🗺️ Fisher-guided LoRA placement | 🔥 Fisher-weighted attribution | ✅ TracIn influence analysis | 🌌 Superposition & polysemanticity |
-| ⚡ K-FAC natural gradient | 🔍 Attention entropy & flow | 🎯 Outlier detection via geometry | ↔️ CKA & representational drift |
+### Optimization Theorist
+- Full Fisher & Hessian spectrum
+- Fisher‑guided LoRA placement
+- K‑FAC natural gradient
+
+### Interpretability Researcher
+- QK‑OV pairing & induction circuits
+- Fisher‑weighted attribution
+- Attention entropy & flow
+
+### Data Scientist
+- Sample conflicts (p‑values, FDR)
+- TracIn influence analysis
+- Outlier detection via geometry
+
+### Representation Expert
+- Embedding singularities & manifold violations
+- Superposition & polysemanticity
+- CKA & representational drift
 
 [Quick Start](#quick-start) • [Research Questions](#unexplored-research-questions) • [Examples](#examples) • [Install](#installation)
+
+---
+
+ 
 
 ---
 
@@ -163,15 +251,15 @@ results.generate_pdf_report("report.pdf")      # Visualizations, interpretations
 ```
 
 **What you get automatically:**
-- ✅ 80+ metrics computed and organized
-- ✅ Statistical significance tests (p-values, FDR correction)
-- ✅ Cross-metric correlations discovered
-- ✅ PDF report with visualizations and interpretations
-- ✅ JSON for programmatic access
-- ✅ Warnings about potential issues
-- ✅ **Automatic comparisons** across multiple models/checkpoints/training runs
-- ✅ **Training trajectory analysis** from checkpoint sequences
-- ✅ **Hyperparameter comparison** (different LR, batch size, etc.)
+- 80+ metrics computed and organized
+- Statistical significance tests (p-values, FDR correction)
+- Cross-metric correlations discovered
+- PDF report with visualizations and interpretations
+- JSON for programmatic access
+- Warnings about potential issues
+- Automatic comparisons across multiple models/checkpoints/training runs
+- Training trajectory analysis from checkpoint sequences
+- Hyperparameter comparison (different LR, batch size, etc.)
 
 **Mode 2: Advanced Research (For specific investigations)**
 
@@ -452,6 +540,22 @@ For detailed examples of specific research tasks (Fisher analysis, gradient diag
 For detailed cross-metric analysis code examples, see:
 
 **[→ Detailed Examples](maindocs/EXAMPLES.md)**
+
+---
+
+## Troubleshooting & FAQ
+
+- CUDA out of memory (OOM)
+  - Reduce micro‑batch size and sequence length; prefer grouped Fisher over K‑FAC.
+  - Disable advanced curvature metrics when not needed (e.g., K‑FAC) and lower Lanczos rank `k`.
+  - Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to reduce fragmentation.
+- K‑FAC or eigendecomposition memory pressure
+  - Apply preconditioners in the eigenbasis instead of reconstructing full matrices.
+  - If reconstruction is necessary, offload `Q` and eigenvalues to CPU for `Q Λ Q^T`.
+- Tokenizer vs embedding size mismatch
+  - Align sizes before analysis: `model.resize_token_embeddings(len(tokenizer))`.
+- Deterministic results
+  - Set seeds and use `torch.use_deterministic_algorithms(True)`; optionally export `CUBLAS_WORKSPACE_CONFIG=:4096:8`.
 
 ---
 

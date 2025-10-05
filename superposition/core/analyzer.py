@@ -606,10 +606,16 @@ class SuperpositionAnalyzer(SuperpositionMetrics):
 
         # Create progress bar for batch processing if needed
         if use_progress:
-            pbar = tqdm(total=total_batch_pairs,
-                       desc="Computing superposition overlaps",
-                       leave=False,
-                       unit="batch_pairs")
+            pbar = tqdm(
+                total=total_batch_pairs,
+                desc="Computing superposition overlaps",
+                leave=False,
+                unit="batch_pairs",
+                dynamic_ncols=True,
+                mininterval=0.5,
+                file=sys.stderr,
+                disable=not use_progress
+            )
         else:
             pbar = None
 

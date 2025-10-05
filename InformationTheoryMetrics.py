@@ -4008,7 +4008,9 @@ class InformationTheoryMetrics:
                     desc="  Compressing tensor batches",
                     unit="batch",
                     leave=False,
-                    file=sys.stderr
+                    file=sys.stderr,
+                    dynamic_ncols=True,
+                    mininterval=0.5
                 )
                 batch_results = []
                 with logging_redirect_tqdm():

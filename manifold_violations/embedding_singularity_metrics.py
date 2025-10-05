@@ -160,7 +160,7 @@ class EmbeddingSingularityMetrics:
         ]
 
         if self.show_progress:
-            stages_pbar = tqdm(stages, desc="Computing metrics", leave=False)
+            stages_pbar = tqdm(stages, desc="Computing metrics", leave=False, file=sys.stderr, dynamic_ncols=True, mininterval=0.5)
         else:
             stages_pbar = stages
 

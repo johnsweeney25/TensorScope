@@ -262,6 +262,9 @@ def cleanup_memory(verbose: bool = False, reason: str = "", model: Optional[torc
     # Optionally clear model gradients aggressively (frees allocated, not just reserved)
     if model is not None:
         try:
+            # Silence tqdm bars during metric execution to avoid log conflicts
+            tqdm_cm = _tqdm_disabled()
+            tqdm_cm.__enter__()
             model.zero_grad(set_to_none=True)
             # Also clear any .grad tensors that might persist on params
             for p in model.parameters():
@@ -2780,6 +2783,11 @@ class MetricRegistry:
         finally:
             # CRITICAL: Clean up GPU memory after EVERY metric to prevent accumulation
             # This prevents the issue where 75GB gets allocated before later metrics run
+            # Close tqdm suppression context
+            try:
+                tqdm_cm.__exit__(None, None, None)
+            except Exception:
+                pass
             if model:
                 # Clear gradients if model exists
                 if hasattr(model, 'zero_grad'):
@@ -3653,7 +3661,12 @@ class MetricRegistry:
 
             else:
                 # Default case for STANDARD signature: (model, batch)
-                # This handles all mechanistic interpretability metrics and other standard metrics
+                # Prefer to disable noisy progress bars for gradient metrics
+                try:
+                    if metric_info.get('module') == 'gradient':
+                        return func(context.model, context.batch, show_progress=False)
+                except TypeError:
+                    pass
                 return func(context.model, context.batch)
 
         elif sig_type == SignatureType.DUAL_BATCH:
@@ -6181,7 +6194,7 @@ class UnifiedModelAnalyzer:
 
         # Process each checkpoint sequentially to manage memory
         loaded_models = []  # Keep models for analyze_training_dynamics
-        for idx, checkpoint in enumerate(tqdm(checkpoints, desc="Analyzing checkpoints")):
+        for idx, checkpoint in enumerate(checkpoints):
             logger.info(f"\n{ProgressLogger.INDICATORS['model']} Checkpoint {idx+1}/{len(checkpoints)}: {checkpoint.name}")
 
             # Track iteration
@@ -6765,7 +6778,7 @@ class UnifiedModelAnalyzer:
         logger.info(f"{ProgressLogger.INDICATORS['computing']} STAGE 1: Single-Model Metrics")
         logger.info("="*60)
 
-        for idx, spec in enumerate(tqdm(model_specs, desc="Computing single-model metrics"), 1):
+        for idx, spec in enumerate(model_specs, 1):
             logger.info(f"\n{ProgressLogger.INDICATORS['model']} Processing model {idx}/{len(model_specs)}: {spec.id}")
             logger.info("-"*40)
 
@@ -10825,3 +10838,18 @@ def main():
 
 if __name__ == "__main__":
     main()
+from contextlib import contextmanager
+
+@contextmanager
+def _tqdm_disabled():
+    """Temporarily disable all tqdm progress bars via environment variable."""
+    import os as _os
+    prev = _os.environ.get('TQDM_DISABLE', None)
+    _os.environ['TQDM_DISABLE'] = '1'
+    try:
+        yield
+    finally:
+        if prev is None:
+            _os.environ.pop('TQDM_DISABLE', None)
+        else:
+            _os.environ['TQDM_DISABLE'] = prev
