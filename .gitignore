@@ -68,4 +68,6 @@ final_test/
 test_report_output/
 test_report_output_latex/
 test_fix_results/
-base_comparison_results/
+base_comparison_results/__pycache__/
+*.pyc
+*.pyo

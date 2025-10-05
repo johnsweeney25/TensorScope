@@ -587,7 +587,24 @@ class KFACNaturalGradient:
             eigvals_clipped = torch.clamp(eigvals, min=min_allowed)
 
             # Reconstruct the stabilised matrix: Q diag(λ_clipped) Q^T.
-            M_stable = (eigvecs * eigvals_clipped.unsqueeze(0)) @ eigvecs.t()
+            # MEMORY FIX: Move eigenvectors to CPU before reconstruction to avoid GPU OOM
+            # The reconstruction M_stable = Q Λ Q^T can be done on CPU without affecting
+            # theoretical correctness, then moved back to GPU for subsequent operations.
+            if eigvecs.device.type == 'cuda':
+                # Free GPU memory by moving to CPU for reconstruction
+                eigvecs_cpu = eigvecs.cpu()
+                eigvals_clipped_cpu = eigvals_clipped.cpu()
+                del eigvecs, eigvals_clipped
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Reconstruct on CPU
+                M_stable = (eigvecs_cpu * eigvals_clipped_cpu.unsqueeze(0)) @ eigvecs_cpu.t()
+                del eigvecs_cpu, eigvals_clipped_cpu
+            else:
+                # Already on CPU, proceed normally
+                M_stable = (eigvecs * eigvals_clipped.unsqueeze(0)) @ eigvecs.t()
+            
             return M_stable.to(orig_device, dtype=orig_dtype)
         except Exception as err:
             logger.error(
