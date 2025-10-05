@@ -34,6 +34,44 @@ results.generate_pdf_report("report.pdf")  # Includes comparison plots
 
 **Tested on 7B models. Most functionality working on 70B (full support in progress).**
 
+---
+
+## 🎯 Quick Wins: Common Problems → Exact Solutions
+
+**Early-warning signals:** Many metrics at ~10% training correlate with final outcomes. Catch problems early, intervene fast.
+
+```python
+from GradientAnalysis import GradientAnalysis
+from BombshellMetrics import BombshellMetrics
+
+grad = GradientAnalysis()
+metrics = BombshellMetrics()
+
+# Problem: Training stuck, loss not decreasing
+pathology = grad.compute_gradient_pathology(model, batch)
+# → "15 layers have vanishing gradients" → Fix: Better initialization/normalization
+
+# Problem: Adding task B hurt task A performance
+conflict = grad.compute_gradient_conflict_pcgrad(model, task_a_batch, task_b_batch)
+# → "Conflict score: 0.82" → Fix: Task-specific adapters or gradient surgery
+
+# Problem: Which training samples are harmful?
+critical = metrics.find_critical_samples(model, train_data, checkpoints)
+# → "Samples 457, 892 have negative influence" → Fix: Remove corrupted/mislabeled data
+
+# Problem: Model memorizing, not learning patterns?
+attention = metrics.compute_attention_entropy(model, batch)
+# → "Attention entropy < 2.0 bits" → Fix: Regularization or more diverse data
+
+# Problem: Can I safely merge these task models?
+conflicts = metrics.analyze_ties_conflicts({'math': math_model, 'code': code_model})
+# → "65% weight conflicts in layer 23" → Fix: Use adapters or TIES-merging
+```
+
+**The key insight:** Internal metrics often reveal problems before loss curves show them. TensorScope finds these patterns automatically across 80+ measurements.
+
+---
+
 ## Table of Contents
 - [Quick Start](#quick-start)
 - [From a Single Pass: Multi-Lens Analysis](#from-a-single-pass-multi-lens-analysis)
@@ -126,6 +164,8 @@ Docs: [Lottery Tickets](docs/LOTTERY_TICKETS_DOCUMENTATION.md)
 ---
 
 ## From a Single Pass: Multi-Lens Analysis
+
+**One forward+backward pass captures 80+ metrics.** Many correlate with final outcomes when measured at ~10% training—enabling early intervention before problems manifest in loss curves.
 
 ### Optimization Theorist
 - Full Fisher & Hessian spectrum
