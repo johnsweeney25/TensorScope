@@ -97,9 +97,6 @@
 
 **What this does:** Computes 80+ metrics in one run (same batch, seed, device) with statistical testing (p-values, FDR). Includes GPU-optimized implementations that scale to production models.
 
-![TensorScope Discovery Workflow](tensorscope_discovery_workflow.png)
-*Example intervention workflow: You have 8 math models—some excel at MMLU, others struggle. **Why?** TensorScope automatically tests 80+ metrics and discovers embedding singularities predict MMLU performance (ρ=-0.91, p<0.001). Now you know WHERE to intervene to improve your models. **This is YOUR unsolved problem**—TensorScope helps you discover the intervention target.*
-
 ### Fisher × Superposition
 **Questions you can now investigate:**
 - Do layers with high Fisher concentration show more or less superposition?
@@ -160,9 +157,6 @@ correlations = results.discover_correlations(
 # Example output:
 # "Fisher concentration vs superposition: ρ=0.73, p<0.001 (FDR corrected)"
 ```
-
-![What YOU Get From YOUR Analysis](tensorscope_your_analysis.png)
-*What YOU get from YOUR models/checkpoints: Left shows automatic correlation discovery across all metrics—YOU interpret which relationships matter for YOUR intervention strategy. Right shows training dynamics from YOUR checkpoints—when should you intervene? Which metrics changed together? TensorScope provides the measurements; YOU decide the intervention timing and targets.*
 
 ---
 
