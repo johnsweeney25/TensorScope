@@ -3351,13 +3351,13 @@ class MetricRegistry:
                     if need_hidden_states:
                         outputs = model(**device_batch, output_hidden_states=True)
                     else:
-                    outputs = model(**device_batch)
+                        outputs = model(**device_batch)
                 else:
                     # Request hidden_states only if needed (for sparsity analysis)
                     if need_hidden_states:
                         outputs = model(**batch, output_hidden_states=True)
-                else:
-                    outputs = model(**batch)
+                    else:
+                        outputs = model(**batch)
 
                 # Extract final hidden states for sparsity analysis
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
@@ -3412,7 +3412,7 @@ class MetricRegistry:
                 if need_hidden_states:
                     outputs = model(**mini_batch, output_hidden_states=True)
                 else:
-                outputs = model(**mini_batch)
+                    outputs = model(**mini_batch)
 
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
                     if preserve_gradients:
@@ -5078,45 +5078,33 @@ class MetricRegistry:
                 try:
                     # Redirect stdout/stderr during superposition analysis to capture tqdm output (tqdm uses stderr)
                     with redirect_stdout(output_buffer), redirect_stderr(output_buffer):
-                    # CRITICAL FIX: Some superposition functions expect (model, batch), not weight_matrix!
-                    # compute_superposition_trajectory and analyze_model extract the weight matrix themselves
-                    if 'compute_superposition_trajectory' in func_name or 'analyze_model_superposition' in func_name:
-                        # These functions expect (model, batch) and extract weight_matrix internally
-                        # Get the original model (may have been moved to CPU for memory management)
-                        model = context.models[0] if context.models else context.model
-                        # Clean up weight_matrix since we won't use it
-                        del weight_matrix
-                            # Disable progress bars when called from unified_model_analysis to prevent conflicts
+                        # CRITICAL FIX: Some superposition functions expect (model, batch), not weight_matrix!
+                        # compute_superposition_trajectory and analyze_model extract the weight matrix themselves
+                        if 'compute_superposition_trajectory' in func_name or 'analyze_model_superposition' in func_name:
+                            model = context.models[0] if context.models else context.model
+                            # Clean up weight_matrix since we won't use it
+                            if 'weight_matrix' in locals():
+                                del weight_matrix
                             try:
                                 result = func(model, context.batch, show_progress=False)
                             except TypeError:
-                                # Fallback if show_progress parameter not supported
-                        result = func(model, context.batch)
-                    elif 'comprehensive_superposition_analysis' in func_name:
-                        # This method has a return_dict parameter for JSON serialization
-                            # Disable progress bars when called from unified_model_analysis to prevent conflicts
+                                result = func(model, context.batch)
+                        elif 'comprehensive_superposition_analysis' in func_name:
                             try:
                                 result = func(weight_matrix, return_dict=True, show_progress=False)
                             except TypeError:
-                                # Fallback if show_progress parameter not supported
-                        result = func(weight_matrix, return_dict=True)
-                    elif 'vector_interference_optimized' in func_name or 'vector_interference' in func_name:
-                        # This method takes return_norms parameter
-                            # Disable progress bars when called from unified_model_analysis to prevent conflicts
+                                result = func(weight_matrix, return_dict=True)
+                        elif 'vector_interference_optimized' in func_name or 'vector_interference' in func_name:
                             try:
                                 result = func(weight_matrix, return_norms=custom_args.get('return_norms', True), show_progress=False)
                             except TypeError:
-                                # Fallback if show_progress parameter not supported
-                        result = func(weight_matrix, return_norms=custom_args.get('return_norms', True))
-                    else:
-                        # Generic superposition method that takes weight_matrix
-                            # Disable progress bars when called from unified_model_analysis to prevent conflicts
+                                result = func(weight_matrix, return_norms=custom_args.get('return_norms', True))
+                        else:
                             try:
                                 result = func(weight_matrix, show_progress=False)
                             except TypeError:
-                                # Fallback if show_progress parameter not supported
-                        result = func(weight_matrix)
-                    
+                                result = func(weight_matrix)
+
                     # Process captured output - integrate tqdm progress into logging system
                     captured = output_buffer.getvalue()
                     if captured and captured.strip():
@@ -5249,13 +5237,11 @@ class MetricRegistry:
                 try:
                     # Redirect stdout during sparsity analysis to capture tqdm output
                     with redirect_stdout(output_buffer):
-                    # The NaN/Inf cleaning is now handled inside compute_feature_sparsity in enhanced.py
-                        # Disable progress bars when called from unified_model_analysis to prevent conflicts
+                        # The NaN/Inf cleaning is now handled inside compute_feature_sparsity in enhanced.py
                         try:
                             result = func(activations=activations, threshold=custom_args.get('threshold', 0.01), show_progress=False)
                         except TypeError:
-                            # Fallback if show_progress parameter not supported
-                    result = func(activations=activations, threshold=custom_args.get('threshold', 0.01))
+                            result = func(activations=activations, threshold=custom_args.get('threshold', 0.01))
                     
                     # Process captured output - integrate tqdm progress into logging system
                     captured = output_buffer.getvalue()
@@ -9802,9 +9788,10 @@ class UnifiedModelAnalyzer:
                 logger.info(f"  QK-OV Config: {qkov_config.num_layers} layers, {qkov_config.num_heads} heads")
 
                 # Create interference metric with Fisher collector
+                # BombshellMetrics inherits from FisherCollector, so pass it directly
                 qkov_metric = QKOVInterferenceMetric(
                     config=qkov_config,
-                    fisher_collector=bombshell.fisher_collector,
+                    fisher_collector=bombshell,  # Pass BombshellMetrics directly (inherits from FisherCollector)
                     epsilon=1e-10,
                     ridge_lambda=1e-8
                 )
@@ -9865,11 +9852,24 @@ class UnifiedModelAnalyzer:
         if 'scale_by_fisher' in fisher_metrics_to_compute and context.batch:
             logger.info("Phase 7: Computing additional Fisher metrics...")
 
-            # Free memory from previous phases
+            # Free memory from previous phases (aggressive cleanup)
             if 'masks' in results:
                 del results['masks']
             if torch.cuda.is_available():
-                cleanup_memory()
+                # Aggressive cleanup before Fisher-scaled gradients
+                cleanup_memory(verbose=True, reason="before Fisher-scaled gradients")
+
+                # Force garbage collection and clear any lingering tensors
+                import gc
+                gc.collect()
+
+                # Clear any cached tensors in the model
+                for name, param in model.named_parameters():
+                    if hasattr(param, 'grad') and param.grad is not None:
+                        param.grad = None
+
+                # Final cleanup
+                cleanup_memory(verbose=True, reason="final cleanup before Fisher-scaled gradients")
 
             try:
                 # Use smaller batch to avoid OOM
@@ -9878,13 +9878,29 @@ class UnifiedModelAnalyzer:
 
                 gradients = self.registry._compute_gradients(model, small_batch)
                 if gradients and task_names:
-                    scaled = bombshell.scale_by_fisher(gradients, task_names[0], -1.0)
+                    # Use the correct Fisher mode (Welford for ICLR reproducibility)
+                    # The warning occurs because scale_by_fisher defaults to mode='ema'
+                    # but we computed Fisher in Welford mode
+                    scaled = bombshell.scale_by_fisher(
+                        gradients,
+                        task_names[0],
+                        temperature=-1.0,
+                        mode='accumulated'  # Use accumulated mode to match our Welford Fisher computation
+                    )
                     results['scaled_gradients'] = {
                         'computed': True,
                         'task': task_names[0],
                         'num_parameters': len(scaled)
                     }
-                    logger.info(f"  ✓ Computed Fisher-scaled gradients")
+                    logger.info(f"  ✓ Computed Fisher-scaled gradients (Welford mode)")
+
+                    # Clean up Fisher-scaled gradients to prevent memory leak
+                    del scaled
+                    del gradients
+                    if torch.cuda.is_available():
+                        cleanup_memory(verbose=True, reason="after Fisher-scaled gradients")
+                        gc.collect()
+
             except torch.cuda.OutOfMemoryError:
                 logger.warning("  Phase 7 skipped due to memory constraints")
             except Exception as e:

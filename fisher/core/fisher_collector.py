@@ -28,6 +28,7 @@ import torch.nn.functional as F
 import logging
 from typing import Dict, Optional, Tuple, Any, Union, List
 from dataclasses import dataclass
+from collections import defaultdict
 import re
 from tqdm import tqdm
 import sys
@@ -175,6 +176,10 @@ class FisherCollector:
         self.crlb_protected = crlb_protected  # CRLB safety flag
         self.store_sscs = False  # Explicitly track if storing SSCs
 
+        # Enhanced attention head analysis
+        self.mechanistic_analyzer = None
+        self._cached_batch = None  # Cache batch for mechanistic analysis
+
         # If cross-task is enabled, set up EVERYTHING it needs
         if self.cross_task_enabled:
             from .gradient_memory_manager import GradientMemoryManager
@@ -208,6 +213,16 @@ class FisherCollector:
             logger.info(f"FisherCollector initialized: reduction={reduction}, storage={storage}, computation_dtype={computation_dtype}")
         else:
             logger.info(f"FisherCollector initialized: reduction={reduction}, storage={storage}")
+
+    def set_mechanistic_analyzer(self, analyzer):
+        """
+        Set the mechanistic analyzer for enhanced attention head categorization.
+
+        Args:
+            analyzer: MechanisticAnalyzer instance for behavioral head analysis
+        """
+        self.mechanistic_analyzer = analyzer
+        logger.info("Enhanced Fisher collection with mechanistic analyzer for behavioral head grouping")
 
     def collect_fisher(
         self,
@@ -290,6 +305,9 @@ class FisherCollector:
         device = next(model.parameters()).device
         batch = {k: v.to(device) if torch.is_tensor(v) else v
                  for k, v in batch.items()}
+
+        # Cache batch for potential mechanistic analysis
+        self._cached_batch = batch
 
         # Validate vocabulary size if model has embeddings
         if 'input_ids' in batch:
@@ -633,10 +651,9 @@ class FisherCollector:
 
                 n = self.n_samples_seen[task]
                 if welford_key in self.fisher_accumulated[task]:
-                    # FIXED: Correct weighted Welford's algorithm
-                    # Weight is number of active tokens for proper normalization
-                    # CRITICAL FIX: Use micro_active_tokens (already computed correctly at line 338-340)
-                    weight = float(micro_active_tokens)
+                    # Weighted Welford's algorithm with token-aware weighting
+                    # Use the total active tokens processed in this batch so micro-batch size does not skew results
+                    weight = float(total_active_tokens)
                     old_mean = self.fisher_accumulated[task][welford_key]
                     new_total_weight = n + weight
 
@@ -734,9 +751,7 @@ class FisherCollector:
         # === NOVEL: Update sample count and compute variance ===
         # FIXED: Use total weight (active tokens) instead of batch size
         if task in self.n_samples_seen:
-            # Weight is total active tokens for proper weighting
-            total_weight = float(total_active_tokens) if 'attention_mask' in batch else float(full_batch_size)
-            self.n_samples_seen[task] += total_weight
+            self.n_samples_seen[task] += float(total_active_tokens)
 
         # Increment sample ID for next batch if cross-task enabled
         if self.cross_task_enabled and task in self.current_sample_id:
@@ -1159,7 +1174,10 @@ class FisherCollector:
         model: nn.Module
     ) -> Tuple[torch.Tensor, str, int]:
         """
-        Reduce Attention layer gradients to per-head.
+        Reduce Attention layer gradients using behavioral head categorization.
+
+        Enhanced version that uses mechanistic analyzer's head specialization
+        taxonomy for more meaningful Fisher grouping.
 
         Args:
             param_name: Parameter name (for identifying Q/K/V/O)
@@ -1168,7 +1186,153 @@ class FisherCollector:
             model: Model (for getting num_heads)
 
         Returns:
-            (group_fisher, 'head', num_heads)
+            (group_fisher, 'behavioral_head', num_groups)
+        """
+        # Try to get behavioral head categorization from mechanistic analyzer
+        if hasattr(self, 'mechanistic_analyzer') and self.mechanistic_analyzer is not None:
+            try:
+                # Get behavioral head types (requires a batch for analysis)
+                if hasattr(self, '_cached_batch') and self._cached_batch is not None:
+                    head_analysis = self.mechanistic_analyzer.compute_attention_head_specialization(
+                        model, self._cached_batch
+                    )
+
+                    if 'head_types' in head_analysis:
+                        # Group heads by behavioral type for Fisher computation
+                        return self._reduce_attention_by_behavior(
+                            param_name, grad_sq, weight_shape, head_analysis['head_types'], model
+                        )
+            except Exception as e:
+                logger.debug(f"Behavioral head analysis failed, falling back to structural: {e}")
+
+        # Fall back to structural head grouping if behavioral analysis fails
+        return self._reduce_attention_structural(param_name, grad_sq, weight_shape, model)
+
+    def _reduce_attention_by_behavior(
+        self,
+        param_name: str,
+        grad_sq: torch.Tensor,
+        weight_shape: torch.Size,
+        head_types: List[Dict],
+        model: nn.Module
+    ) -> Tuple[torch.Tensor, str, int]:
+        """
+        Reduce attention gradients using behavioral head categorization.
+
+        Groups heads by their functional behavior (induction, positional, etc.)
+        rather than just structural position.
+
+        Args:
+            param_name: Parameter name
+            grad_sq: Squared gradients
+            weight_shape: Weight tensor shape
+            head_types: Behavioral head classifications from mechanistic analyzer
+            model: Model
+
+        Returns:
+            (group_fisher, 'behavioral_head', num_behavioral_groups)
+        """
+        num_heads = self._get_num_heads(param_name, model)
+        if num_heads is None or num_heads == 1:
+            return self._reduce_linear(grad_sq, weight_shape)
+
+        # Group heads by behavioral type
+        behavioral_groups = defaultdict(list)
+        for i, head_info in enumerate(head_types):
+            if i < num_heads:  # Safety check
+                behavioral_groups[head_info['type']].append(i)
+
+        if not behavioral_groups:
+            # Fall back to structural if no behavioral groups
+            return self._reduce_attention_structural(param_name, grad_sq, weight_shape, model)
+
+        # Compute Fisher for each behavioral group
+        group_fishers = []
+        group_labels = []
+
+        hidden_size = weight_shape[-1]
+        head_dim = hidden_size // num_heads
+
+        for behavior_type, head_indices in behavioral_groups.items():
+            if 'q_proj' in param_name or 'k_proj' in param_name or 'v_proj' in param_name:
+                # Q/K/V projections: group heads by behavior
+                group_grad_sq = self._extract_behavioral_heads(
+                    grad_sq, head_indices, weight_shape, 'qkv'
+                )
+                if group_grad_sq is not None:
+                    group_fisher = group_grad_sq.sum(dim=[1, 2])  # Sum over head_dim and hidden
+                    group_fishers.append(group_fisher)
+                    group_labels.append(f"{behavior_type}")
+
+            elif 'o_proj' in param_name:
+                # O projection: group heads by behavior
+                group_grad_sq = self._extract_behavioral_heads(
+                    grad_sq, head_indices, weight_shape, 'o'
+                )
+                if group_grad_sq is not None:
+                    group_fisher = group_grad_sq.sum(dim=[0, 2])  # Sum over hidden and head_dim
+                    group_fishers.append(group_fisher)
+                    group_labels.append(f"{behavior_type}")
+
+        if not group_fishers:
+            # Ultimate fallback
+            return self._reduce_linear(grad_sq, weight_shape)
+
+        # Concatenate all behavioral groups
+        final_fisher = torch.cat(group_fishers)
+        return final_fisher, 'behavioral_head', len(group_fishers)
+
+    def _extract_behavioral_heads(
+        self,
+        grad_sq: torch.Tensor,
+        head_indices: List[int],
+        weight_shape: torch.Size,
+        proj_type: str
+    ) -> Optional[torch.Tensor]:
+        """Extract gradients for specific behavioral head groups."""
+        try:
+            num_heads = len(head_indices)
+            hidden_size = weight_shape[-1]
+            head_dim = hidden_size // (max(head_indices) + 1) if head_indices else hidden_size
+
+            if proj_type in ['qkv', 'q_proj', 'k_proj', 'v_proj']:
+                # Q/K/V: (num_heads * head_dim, hidden_size)
+                if weight_shape[0] % (max(head_indices) + 1) == 0:
+                    # Reshape and select behavioral heads
+                    all_heads = grad_sq.view(max(head_indices) + 1, -1, weight_shape[-1])
+                    behavioral_heads = all_heads[head_indices]  # Select specific heads
+                    return behavioral_heads
+
+            elif proj_type == 'o_proj':
+                # O: (hidden_size, num_heads * head_dim)
+                if weight_shape[1] % (max(head_indices) + 1) == 0:
+                    # Reshape and select behavioral heads
+                    all_heads = grad_sq.view(weight_shape[0], max(head_indices) + 1, -1)
+                    behavioral_heads = all_heads[:, head_indices]  # Select specific heads
+                    return behavioral_heads
+
+        except Exception as e:
+            logger.debug(f"Behavioral head extraction failed: {e}")
+
+        return None
+
+    def _reduce_attention_structural(
+        self,
+        param_name: str,
+        grad_sq: torch.Tensor,
+        weight_shape: torch.Size,
+        model: nn.Module
+    ) -> Tuple[torch.Tensor, str, int]:
+        """
+        Architecture-agnostic attention head grouping.
+
+        Handles multiple architectures:
+        - Standard: (num_heads * head_dim, hidden_size)
+        - Qwen-style: (hidden_size, hidden_size)
+        - GQA/MQA: Different KV head counts
+        - Fused QKV: Various layouts
+
+        Falls back gracefully when head structure doesn't match expectations.
         """
         # Try to infer number of heads
         num_heads = self._get_num_heads(param_name, model)
@@ -1176,30 +1340,74 @@ class FisherCollector:
             # Fall back to channel reduction if heads unknown
             return self._reduce_linear(grad_sq, weight_shape)
 
-        # Attention weights are typically (hidden_size, hidden_size)
-        # or (3*hidden_size, hidden_size) for combined QKV
         hidden_size = weight_shape[-1]
-        head_dim = hidden_size // num_heads
+        
+        # Try to detect head_dim from actual weight shapes
+        # For GQA, K/V might have different number of heads
+        is_kv_proj = 'k_proj' in param_name or 'v_proj' in param_name
+        if is_kv_proj and hasattr(model, 'config'):
+            num_kv_heads = getattr(model.config, 'num_key_value_heads', num_heads)
+            if num_kv_heads != num_heads:
+                # GQA detected - use KV head count
+                num_heads_actual = num_kv_heads
+            else:
+                num_heads_actual = num_heads
+        else:
+            num_heads_actual = num_heads
 
-        # Reshape to separate heads and sum within each head
+        # Strategy 1: Try standard head layout (most architectures)
         if 'q_proj' in param_name or 'k_proj' in param_name or 'v_proj' in param_name:
-            # Output dimension should be divisible by num_heads
-            if weight_shape[0] % num_heads == 0:
+            # Q/K/V: Check if output dim is divisible by num_heads
+            if weight_shape[0] % num_heads_actual == 0:
+                head_dim = weight_shape[0] // num_heads_actual
                 # Reshape: (num_heads * head_dim, hidden_size) -> (num_heads, head_dim, hidden_size)
-                grad_reshaped = grad_sq.view(num_heads, -1, weight_shape[-1])
-                # Sum over head_dim and hidden_size
-                group_fisher = grad_reshaped.sum(dim=[1, 2])
-                return group_fisher, 'head', num_heads
-        elif 'o_proj' in param_name:
-            # Output projection: (hidden_size, num_heads * head_dim)
-            if weight_shape[1] % num_heads == 0:
-                # Reshape: (hidden_size, num_heads * head_dim) -> (hidden_size, num_heads, head_dim)
-                grad_reshaped = grad_sq.view(weight_shape[0], num_heads, -1)
-                # Sum over hidden_size and head_dim
-                group_fisher = grad_reshaped.sum(dim=[0, 2])
-                return group_fisher, 'head', num_heads
+                try:
+                    grad_reshaped = grad_sq.view(num_heads_actual, head_dim, weight_shape[-1])
+                    # Sum over head_dim and hidden_size
+                    group_fisher = grad_reshaped.sum(dim=[1, 2])
+                    return group_fisher, 'head', num_heads_actual
+                except RuntimeError:
+                    pass  # Fall through to next strategy
 
-        # Fall back to channel reduction
+            # Strategy 2: Try Qwen-style (hidden_size, hidden_size)
+            # For these, we can't separate heads structurally, so use channel reduction
+            if weight_shape[0] == hidden_size:
+                logger.debug(f"Qwen-style projection detected for {param_name}, using channel reduction")
+                # Can't separate heads - use row-wise reduction instead
+                group_fisher = grad_sq.sum(dim=1) if grad_sq.dim() > 1 else grad_sq
+                # Return num_heads groups by splitting rows evenly
+                num_groups = min(num_heads_actual, grad_sq.shape[0])
+                if grad_sq.shape[0] % num_groups == 0:
+                    chunk_size = grad_sq.shape[0] // num_groups
+                    group_fisher = grad_sq.reshape(num_groups, chunk_size, -1).sum(dim=[1, 2])
+                    return group_fisher, 'head_row', num_groups
+                
+        elif 'o_proj' in param_name:
+            # O projection: (hidden_size, num_heads * head_dim)
+            if weight_shape[1] % num_heads == 0:
+                head_dim = weight_shape[1] // num_heads
+                # Reshape: (hidden_size, num_heads * head_dim) -> (hidden_size, num_heads, head_dim)
+                try:
+                    grad_reshaped = grad_sq.view(weight_shape[0], num_heads, head_dim)
+                    # Sum over hidden_size and head_dim
+                    group_fisher = grad_reshaped.sum(dim=[0, 2])
+                    return group_fisher, 'head', num_heads
+                except RuntimeError:
+                    pass  # Fall through to fallback
+
+            # Strategy 2: Qwen-style O projection
+            if weight_shape[0] == hidden_size:
+                logger.debug(f"Qwen-style O projection detected for {param_name}, using column reduction")
+                group_fisher = grad_sq.sum(dim=0) if grad_sq.dim() > 1 else grad_sq
+                # Split into head groups
+                num_groups = min(num_heads, grad_sq.shape[1] if grad_sq.dim() > 1 else 1)
+                if grad_sq.shape[1] % num_groups == 0:
+                    chunk_size = grad_sq.shape[1] // num_groups
+                    group_fisher = grad_sq.reshape(-1, num_groups, chunk_size).sum(dim=[0, 2])
+                    return group_fisher, 'head_col', num_groups
+
+        # Ultimate fallback: linear reduction (treat as channels)
+        logger.debug(f"Could not separate heads for {param_name}, using channel reduction")
         return self._reduce_linear(grad_sq, weight_shape)
 
     def _reduce_embedding(

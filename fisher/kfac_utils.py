@@ -430,17 +430,17 @@ class KFACNaturalGradient:
                     if self.use_eigenvalue_correction:
                         A_decomp = self._stabilize_matrix(A, name + "_A", damping=self.damping_A)
                         G_decomp = self._stabilize_matrix(G, name + "_G", damping=self.damping_G)
-                        
+
                         # Update with EMA in eigenspace (more efficient than reconstructing)
                         if name in self.kfac_factors and 'A_eigvals' in self.kfac_factors[name]:
                             # EMA update in decomposed form
                             old_A_eigvals = self.kfac_factors[name]['A_eigvals']
                             old_G_eigvals = self.kfac_factors[name]['G_eigvals']
-                            
+
                             # Simple EMA on eigenvalues (eigenvectors change slowly, so we update less frequently)
                             A_eigvals_updated = self.ema_decay * old_A_eigvals + (1 - self.ema_decay) * A_decomp['eigvals']
                             G_eigvals_updated = self.ema_decay * old_G_eigvals + (1 - self.ema_decay) * G_decomp['eigvals']
-                            
+
                             # Store updated decomposition
                             self.kfac_factors[name] = {
                                 'A_eigvecs': A_decomp['eigvecs'],  # Update eigenvectors each time
@@ -448,7 +448,7 @@ class KFACNaturalGradient:
                                 'G_eigvecs': G_decomp['eigvecs'],
                                 'G_eigvals': G_eigvals_updated
                             }
-                    else:
+                        else:
                             # First time: store decomposition directly
                             self.kfac_factors[name] = {
                                 'A_eigvecs': A_decomp['eigvecs'],
@@ -460,7 +460,7 @@ class KFACNaturalGradient:
                         # Simple damping without eigenvalue correction
                         A_damped = A + self.damping_A * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
                         G_damped = G + self.damping_G * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
-                        
+
                         # Still store as decomposition for consistency (identity eigenvectors)
                         n_A, n_G = A.shape[0], G.shape[0]
                         self.kfac_factors[name] = {
