@@ -85,55 +85,81 @@ conflicts = metrics.analyze_ties_conflicts({'math': math_model, 'code': code_mod
 - [Contributing](#contributing)
 - [Citation](#citation)
 
-## 80+ Metrics: What's Included
+## What You Get: 80+ Metrics in One Pass
 
-**Optimization & Curvature:** Fisher/Hessian eigenvalues (Lanczos) • Loss landscape • Mode connectivity • SAM sharpness • K-FAC
-
-**Fisher Information:** Group Fisher (Welford/EMA) • Fisher overlap • Importance scoring • Pruning masks • Task similarity
-
-**Gradients & Training:** Gradient pathology • PCGrad conflict • Layer alignment • Conflict pairs • Training trajectory
-
-**Attribution & Influence:** TracIn • Integrated gradients • Critical samples • Task vectors • TIES conflicts
-
-**Attention & Circuits:** Induction heads • QK-OV pairing • Attention entropy • Flow patterns • Logit lens
-
-**Representation & Geometry:** CKA/RSA similarity • Effective rank • Superposition analysis • Feature sparsity
-
-**Embeddings & Manifolds:** Embedding singularities (Robinson) • Fiber bundle test • Manifold curvature
-
-**Information Theory:** Mutual information • Compression ratio • Plasticity index • Information flow
-
-**Lottery Tickets & Pruning:** Early Bird tickets • Iterative magnitude pruning • Ticket overlap • Robustness
-
-**All metrics include:** Statistical testing (p-values, FDR correction, confidence intervals)
-
-**[→ Full catalog with descriptions](maindocs/METRICS_CATALOG.md)** • **[→ Method docs](docs/)**
+**One forward+backward pass captures everything.** Many metrics correlate with final outcomes when measured at ~10% training—catch problems early, intervene before they show up in loss curves.
 
 ---
 
-## From a Single Pass: Multi-Lens Analysis
+### 🔬 For Optimization & Training Researchers
 
-**One forward+backward pass captures 80+ metrics.** Many correlate with final outcomes when measured at ~10% training—enabling early intervention before problems manifest in loss curves.
+**What you can do:**
+- Place LoRA/adapters using Fisher importance (avoid wasting parameters on low-importance regions)
+- Detect gradient pathology before training fails (vanishing/exploding gradients per layer)
+- Measure task interference in multi-task learning (PCGrad conflicts with statistical significance)
+- Compute natural gradients via K-FAC (closed-form capacity metrics: trace, log-det, condition number)
 
-### Optimization Theorist
-- Full Fisher & Hessian spectrum
-- Fisher‑guided LoRA placement
-- K‑FAC natural gradient
+**Key metrics:** Fisher/Hessian eigenvalues (Lanczos) • Loss landscape • Mode connectivity • SAM sharpness • Gradient pathology • PCGrad conflict • Layer alignment • K-FAC natural gradient
 
-### Interpretability Researcher
-- QK‑OV pairing & induction circuits
-- Fisher‑weighted attribution
-- Attention entropy & flow
+**Technical depth:** Curvature analysis (Fisher, Hessian, spectral) • Gradient diagnostics (pathology, conflict, alignment, trajectory) • Optimization geometry (sharpness, barriers, connectivity)
 
-### Data Scientist
-- Sample conflicts (p‑values, FDR)
-- TracIn influence analysis
-- Outlier detection via geometry
+---
 
-### Representation Expert
-- Embedding singularities & manifold violations
-- Superposition & polysemanticity
-- CKA & representational drift
+### 🧩 For Interpretability & Mechanistic Analysis
+
+**What you can do:**
+- Identify induction heads and in-context learning circuits (Olsson et al. 2022 implementation)
+- Trace information flow through attention layers (QK-OV composition patterns)
+- Attribute predictions to specific inputs (integrated gradients, attention attribution)
+- Validate mechanistic hypotheses via activation patching
+
+**Key metrics:** Induction heads • QK-OV pairing • Attention entropy • Attention flow • Logit lens • Integrated gradients • Causal necessity
+
+**Technical depth:** Circuit analysis (induction heads, QK-OV, head specialization) • Attribution methods (integrated gradients, attention attribution, causal analysis) • Attention patterns (entropy, drift, concentration, flow)
+
+---
+
+### 📊 For Data Scientists & ML Engineers
+
+**What you can do:**
+- Find harmful training samples (TracIn influence with statistical significance)
+- Detect mislabeled or corrupted data (outlier detection via geometry)
+- Identify cross-task conflicts at the sample level (which specific examples interfere)
+- Debug model merging failures (TIES conflict analysis with effect sizes)
+
+**Key metrics:** TracIn • Critical samples • Sample conflicts (p-values, FDR) • Task vectors • TIES conflicts • Embedding singularities
+
+**Technical depth:** Influence analysis (TracIn, critical samples) • Data quality (outlier detection, conflict identification) • Model merging (task vectors, TIES, intervention vectors)
+
+---
+
+### 🎨 For Representation & Geometry Researchers
+
+**What you can do:**
+- Measure representational similarity across layers/models (CKA with statistical testing)
+- Quantify superposition and polysemanticity (how many features per neuron)
+- Detect geometric pathologies (embedding singularities, manifold violations per Robinson et al.)
+- Track representation evolution during training (effective rank, compression, drift)
+
+**Key metrics:** CKA/RSA similarity • Effective rank • Superposition analysis • Feature sparsity • Embedding singularities (Robinson) • Manifold curvature
+
+**Technical depth:** Similarity analysis (CKA, RSA, block CKA gap) • Superposition metrics (interference, sparsity, dimensional scaling) • Manifold geometry (singularities, fiber bundle test, Ricci curvature) • Information theory (mutual information, compression, plasticity)
+
+---
+
+### 🎯 Additional Capabilities
+
+**Lottery Tickets & Pruning:** Early Bird tickets • Iterative magnitude pruning • Pruning robustness • Ticket overlap
+
+**Multi-Task Learning:** Fisher overlap • Task similarity • Gradient conflicts • Intervention vectors • Null space projection
+
+**Training Dynamics:** Phase transitions • Grokking detection • Plasticity index • Signal propagation • Alignment fragility
+
+---
+
+**All metrics include:** Statistical testing (p-values, FDR correction, confidence intervals, bootstrap CIs)
+
+**[→ Full catalog with descriptions](maindocs/METRICS_CATALOG.md)** • **[→ Method documentation](docs/)**
 
 [Quick Start](#quick-start) • [Research Questions](#unexplored-research-questions) • [Examples](#examples) • [Install](#installation)
 
