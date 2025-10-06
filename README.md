@@ -1,87 +1,32 @@
 # TensorScope — Cross-Metric Neural Network Analysis
 
-**The simplest way to understand your neural network:**
+**Composable metrics for novel research.** Most tools give you metrics in isolation. TensorScope computes 80+ metrics in one pass with identical conditions, enabling research that wasn't possible before:
 
-```python
-from unified_model_analysis import UnifiedModelAnalyzer
+- **Fisher → LoRA placement:** Identify high-importance regions, avoid wasting parameters
+- **Fisher × Superposition:** Discover if important regions are polysemantic (unstable)
+- **Geometry × Curvature:** Find embedding singularities in high-Fisher areas (intervention targets)
+- **Circuits × Conflicts:** Identify which attention heads cause task interference
+- **Superposition → Regularizers:** Design sparsity penalties based on measured feature interference
 
-analyzer = UnifiedModelAnalyzer()
+**Why this matters:** These algorithms exist in papers but lack production implementations. We provide GPU-optimized versions that scale to 7B-70B models, not toy examples.
 
-# Single model analysis
-results = analyzer.analyze_models([your_model])
+**Tested on 7B models. Most functionality working on 70B.**
 
-# Or compare multiple training runs automatically
-results = analyzer.analyze_models([
-    model_lr_1e4,
-    model_lr_1e3,
-    model_lr_1e2
-])
+![TensorScope Discovery Workflow](tensorscope_discovery_workflow.png)
+*Example: Discover that embedding singularities predict MMLU performance (ρ=-0.91, p<0.001). Now you know where to intervene.*
 
-# Or analyze training trajectory from checkpoints
-results = analyzer.analyze_models([
-    'checkpoint_1k.pt',
-    'checkpoint_5k.pt', 
-    'checkpoint_10k.pt',
-    'final_model.pt'
-])
-
-# Get comprehensive JSON report + PDF visualizations with automatic comparisons
-results.save_report("analysis.json")
-results.generate_pdf_report("report.pdf")  # Includes comparison plots
-```
-
-**One line. 80+ metrics. Automatic comparisons across runs/checkpoints. PDF report with everything.**
-
-**Tested on 7B models. Most functionality working on 70B (full support in progress).**
-
----
-
-## 🎯 Quick Wins: Common Problems → Exact Solutions
-
-**Early-warning signals:** Many metrics at ~10% training correlate with final outcomes. Catch problems early, intervene fast.
-
-```python
-from GradientAnalysis import GradientAnalysis
-from BombshellMetrics import BombshellMetrics
-
-grad = GradientAnalysis()
-metrics = BombshellMetrics()
-
-# Problem: Training stuck, loss not decreasing
-pathology = grad.compute_gradient_pathology(model, batch)
-# → "15 layers have vanishing gradients" → Fix: Better initialization/normalization
-
-# Problem: Adding task B hurt task A performance
-conflict = grad.compute_gradient_conflict_pcgrad(model, task_a_batch, task_b_batch)
-# → "Conflict score: 0.82" → Fix: Task-specific adapters or gradient surgery
-
-# Problem: Which training samples are harmful?
-critical = metrics.find_critical_samples(model, train_data, checkpoints)
-# → "Samples 457, 892 have negative influence" → Fix: Remove corrupted/mislabeled data
-
-# Problem: Model memorizing, not learning patterns?
-attention = metrics.compute_attention_entropy(model, batch)
-# → "Attention entropy < 2.0 bits" → Fix: Regularization or more diverse data
-
-# Problem: Can I safely merge these task models?
-conflicts = metrics.analyze_ties_conflicts({'math': math_model, 'code': code_model})
-# → "65% weight conflicts in layer 23" → Fix: Use adapters or TIES-merging
-```
-
-**The key insight:** Internal metrics often reveal problems before loss curves show them. TensorScope finds these patterns automatically across 80+ measurements.
+![What YOU Get From YOUR Analysis](tensorscope_your_analysis.png)
+*Automatic correlation discovery across all metrics. You interpret which relationships matter for your research.*
 
 ---
 
 ## Table of Contents
+- [What You Get](#what-you-get-80-metrics-in-one-pass)
 - [Quick Start](#quick-start)
-- [From a Single Pass: Multi-Lens Analysis](#from-a-single-pass-multi-lens-analysis)
-- [Performance & Memory](#performance--memory)
-- [Metrics Catalog](#metrics-catalog)
+- [Unexplored Research Questions](#unexplored-research-questions)
 - [Examples](#examples)
 - [Installation](#installation)
-- [Troubleshooting & FAQ](#troubleshooting--faq)
 - [API Reference](#api-reference)
-- [Interpretation Guide](#interpretation-guide)
 - [Contributing](#contributing)
 - [Citation](#citation)
 
