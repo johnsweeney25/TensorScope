@@ -38,57 +38,33 @@
 
 ### 🔬 For Optimization & Training Researchers
 
-**What you can do:**
-- Place LoRA/adapters using Fisher importance (avoid wasting parameters on low-importance regions)
-- Detect gradient pathology before training fails (vanishing/exploding gradients per layer)
-- Measure task interference in multi-task learning (PCGrad conflicts with statistical significance)
-- Compute natural gradients via K-FAC (closed-form capacity metrics: trace, log-det, condition number)
+**Capabilities:** Fisher-guided LoRA placement • Gradient pathology detection • Multi-task interference measurement • K-FAC natural gradients • Loss landscape analysis
 
-**Key metrics:** Fisher/Hessian eigenvalues (Lanczos) • Loss landscape • Mode connectivity • SAM sharpness • Gradient pathology • PCGrad conflict • Layer alignment • K-FAC natural gradient
-
-**Technical depth:** Curvature analysis (Fisher, Hessian, spectral) • Gradient diagnostics (pathology, conflict, alignment, trajectory) • Optimization geometry (sharpness, barriers, connectivity)
+**Metrics:** Fisher/Hessian eigenvalues (Lanczos) • Loss landscape • Mode connectivity • SAM sharpness • Gradient pathology • PCGrad conflict • Layer alignment • K-FAC
 
 ---
 
 ### 🧩 For Interpretability & Mechanistic Analysis
 
-**What you can do:**
-- Identify induction heads and in-context learning circuits (Olsson et al. 2022 implementation)
-- Trace information flow through attention layers (QK-OV composition patterns)
-- Attribute predictions to specific inputs (integrated gradients, attention attribution)
-- Validate mechanistic hypotheses via activation patching
+**Capabilities:** Induction head detection • QK-OV circuit tracing • Attribution analysis • Activation patching • Information flow analysis
 
-**Key metrics:** Induction heads • QK-OV pairing • Attention entropy • Attention flow • Logit lens • Integrated gradients • Causal necessity
-
-**Technical depth:** Circuit analysis (induction heads, QK-OV, head specialization) • Attribution methods (integrated gradients, attention attribution, causal analysis) • Attention patterns (entropy, drift, concentration, flow)
+**Metrics:** Induction heads • QK-OV pairing • Attention entropy • Attention flow • Logit lens • Integrated gradients • Causal necessity • Head specialization
 
 ---
 
 ### 📊 For Data Scientists & ML Engineers
 
-**What you can do:**
-- Find harmful training samples (TracIn influence with statistical significance)
-- Detect mislabeled or corrupted data (outlier detection via geometry)
-- Identify cross-task conflicts at the sample level (which specific examples interfere)
-- Debug model merging failures (TIES conflict analysis with effect sizes)
+**Capabilities:** Harmful sample detection • Outlier identification • Sample-level conflict analysis • Model merging diagnostics • Data quality assessment
 
-**Key metrics:** TracIn • Critical samples • Sample conflicts (p-values, FDR) • Task vectors • TIES conflicts • Embedding singularities
-
-**Technical depth:** Influence analysis (TracIn, critical samples) • Data quality (outlier detection, conflict identification) • Model merging (task vectors, TIES, intervention vectors)
+**Metrics:** TracIn • Critical samples • Sample conflicts (p-values, FDR) • Task vectors • TIES conflicts • Embedding singularities • Intervention vectors
 
 ---
 
 ### 🎨 For Representation & Geometry Researchers
 
-**What you can do:**
-- Measure representational similarity across layers/models (CKA with statistical testing)
-- Quantify superposition and polysemanticity (how many features per neuron)
-- Detect geometric pathologies (embedding singularities, manifold violations per Robinson et al.)
-- Track representation evolution during training (effective rank, compression, drift)
+**Capabilities:** Representational similarity measurement • Superposition quantification • Geometric pathology detection • Representation evolution tracking • Manifold analysis
 
-**Key metrics:** CKA/RSA similarity • Effective rank • Superposition analysis • Feature sparsity • Embedding singularities (Robinson) • Manifold curvature
-
-**Technical depth:** Similarity analysis (CKA, RSA, block CKA gap) • Superposition metrics (interference, sparsity, dimensional scaling) • Manifold geometry (singularities, fiber bundle test, Ricci curvature) • Information theory (mutual information, compression, plasticity)
+**Metrics:** CKA/RSA similarity • Effective rank • Superposition analysis • Feature sparsity • Embedding singularities (Robinson) • Manifold curvature • Fiber bundle test • Mutual information
 
 ---
 
