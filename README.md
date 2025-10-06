@@ -85,33 +85,29 @@ conflicts = metrics.analyze_ties_conflicts({'math': math_model, 'code': code_mod
 - [Contributing](#contributing)
 - [Citation](#citation)
 
-## Metrics Catalog
+## 80+ Metrics: What's Included
 
-<details>
-<summary><b>What metrics are included? (Click to expand 80+ metrics)</b></summary>
+**Optimization & Curvature:** Fisher/Hessian eigenvalues (Lanczos) • Loss landscape • Mode connectivity • SAM sharpness • K-FAC
 
-Representative highlights (full catalog in maindocs/METRICS_CATALOG.md):
+**Fisher Information:** Group Fisher (Welford/EMA) • Fisher overlap • Importance scoring • Pruning masks • Task similarity
 
-- Optimization & Curvature: Fisher/Hessian eigenvalues (Lanczos), loss landscape 2D, mode connectivity
-- Fisher: Group Fisher (Welford/EMA), Fisher overlap, Fisher importance + pruning masks
-- Gradients: Gradient pathology, PCGrad conflict, layer gradient alignment
-- Attribution & Influence: TracIn, integrated gradients, causal necessity
-- Attention & Circuits: Induction heads, QK‑OV pairing, attention entropy
-- Representation & Geometry: CKA/RSA similarity, effective rank, superposition analysis
-- Embeddings & Manifolds: Embedding singularities (Robinson), fiber bundle test
-- Information Theory & Dynamics: Information flow, compression ratio, plasticity index
-- Lottery & Pruning: Early Bird tickets, iterative magnitude pruning, ticket overlap
-- Modularity & Architecture: Fisher‑weighted damage, damage asymmetry, OV→U
+**Gradients & Training:** Gradient pathology • PCGrad conflict • Layer alignment • Conflict pairs • Training trajectory
 
-See also docs for selected methods:
-- Fisher Lanczos: docs/FISHER_EIGENVALUES_LANCZOS_DOCUMENTATION.md
-- SAM sharpness: docs/SAM_SHARPNESS_DOCUMENTATION.md
-- Loss landscape: docs/LOSS_LANDSCAPE_2D_DOCUMENTATION.md
-- TracIn: docs/TRACIN_DOCUMENTATION.md
-- Manifold metrics: docs/MANIFOLD_METRICS_DOCUMENTATION.md
-- MDL/PID: docs/MDL_COMPLEXITY_IMPLEMENTATION.md, docs/HEURISTIC_PID_MINMI_DOCUMENTATION.md
+**Attribution & Influence:** TracIn • Integrated gradients • Critical samples • Task vectors • TIES conflicts
 
-</details>
+**Attention & Circuits:** Induction heads • QK-OV pairing • Attention entropy • Flow patterns • Logit lens
+
+**Representation & Geometry:** CKA/RSA similarity • Effective rank • Superposition analysis • Feature sparsity
+
+**Embeddings & Manifolds:** Embedding singularities (Robinson) • Fiber bundle test • Manifold curvature
+
+**Information Theory:** Mutual information • Compression ratio • Plasticity index • Information flow
+
+**Lottery Tickets & Pruning:** Early Bird tickets • Iterative magnitude pruning • Ticket overlap • Robustness
+
+**All metrics include:** Statistical testing (p-values, FDR correction, confidence intervals)
+
+**[→ Full catalog with descriptions](maindocs/METRICS_CATALOG.md)** • **[→ Method docs](docs/)**
 
 ---
 
