@@ -1356,10 +1356,16 @@ class FisherCollector:
             num_heads_actual = num_heads
 
         # Strategy 1: Try standard head layout (most architectures)
-        if 'q_proj' in param_name or 'k_proj' in param_name or 'v_proj' in param_name:
+        # Handle both separate Q/K/V and fused QKV patterns
+        is_qkv_proj = ('q_proj' in param_name or 'k_proj' in param_name or 'v_proj' in param_name or
+                      'c_attn' in param_name or 'qkv' in param_name or 'in_proj' in param_name)
+
+        if is_qkv_proj:
             # Q/K/V: Check if output dim is divisible by num_heads
             if weight_shape[0] % num_heads_actual == 0:
-                head_dim = weight_shape[0] // num_heads_actual
+                # For standard layout: (num_heads * head_dim, hidden_size)
+                # head_dim should be hidden_size // num_heads, not weight_shape[0] // num_heads
+                head_dim = hidden_size // num_heads_actual
                 # Reshape: (num_heads * head_dim, hidden_size) -> (num_heads, head_dim, hidden_size)
                 try:
                     grad_reshaped = grad_sq.view(num_heads_actual, head_dim, weight_shape[-1])
@@ -1370,7 +1376,6 @@ class FisherCollector:
                     pass  # Fall through to next strategy
 
             # Strategy 2: Try Qwen-style (hidden_size, hidden_size)
-            # For these, we can't separate heads structurally, so use channel reduction
             if weight_shape[0] == hidden_size:
                 logger.debug(f"Qwen-style projection detected for {param_name}, using channel reduction")
                 # Can't separate heads - use row-wise reduction instead
@@ -1381,10 +1386,28 @@ class FisherCollector:
                     chunk_size = grad_sq.shape[0] // num_groups
                     group_fisher = grad_sq.reshape(num_groups, chunk_size, -1).sum(dim=[1, 2])
                     return group_fisher, 'head_row', num_groups
+
+            # Strategy 3: Try fused QKV (GPT-style: 3*hidden_size, hidden_size)
+            if weight_shape[0] == 3 * hidden_size and 'c_attn' in param_name:
+                logger.debug(f"GPT-style fused QKV detected for {param_name}")
+                # Split into Q, K, V blocks, then apply head reduction to each
+                qkv_blocks = grad_sq.view(3, hidden_size, -1)
+                q_block, k_block, v_block = qkv_blocks
+
+                # Apply head reduction to each Q/K/V block separately
+                q_fisher, _, _ = self._reduce_attention_separate_qkv(q_block, hidden_size, num_heads_actual, 'q')
+                k_fisher, _, _ = self._reduce_attention_separate_qkv(k_block, hidden_size, num_heads_actual, 'k')
+                v_fisher, _, _ = self._reduce_attention_separate_qkv(v_block, hidden_size, num_heads_actual, 'v')
+
+                # Combine Q/K/V fishers (they should have same shape)
+                if q_fisher.shape == k_fisher.shape == v_fisher.shape:
+                    group_fisher = (q_fisher + k_fisher + v_fisher) / 3  # Average across Q/K/V
+                    return group_fisher, 'head_fused', num_heads_actual
                 
         elif 'o_proj' in param_name:
-            # O projection: (hidden_size, num_heads * head_dim)
+            # O projection: (hidden_size, num_heads * head_dim) or (hidden_size, hidden_size)
             if weight_shape[1] % num_heads == 0:
+                # Standard layout: input features are num_heads * head_dim
                 head_dim = weight_shape[1] // num_heads
                 # Reshape: (hidden_size, num_heads * head_dim) -> (hidden_size, num_heads, head_dim)
                 try:
@@ -1395,11 +1418,11 @@ class FisherCollector:
                 except RuntimeError:
                     pass  # Fall through to fallback
 
-            # Strategy 2: Qwen-style O projection
-            if weight_shape[0] == hidden_size:
+            # Strategy 2: Qwen-style O projection (hidden_size, hidden_size)
+            if weight_shape[1] == hidden_size:
                 logger.debug(f"Qwen-style O projection detected for {param_name}, using column reduction")
                 group_fisher = grad_sq.sum(dim=0) if grad_sq.dim() > 1 else grad_sq
-                # Split into head groups
+                # Split into head groups by chunking columns
                 num_groups = min(num_heads, grad_sq.shape[1] if grad_sq.dim() > 1 else 1)
                 if grad_sq.shape[1] % num_groups == 0:
                     chunk_size = grad_sq.shape[1] // num_groups
@@ -1409,6 +1432,40 @@ class FisherCollector:
         # Ultimate fallback: linear reduction (treat as channels)
         logger.debug(f"Could not separate heads for {param_name}, using channel reduction")
         return self._reduce_linear(grad_sq, weight_shape)
+
+    def _reduce_attention_separate_qkv(
+        self,
+        grad_sq: torch.Tensor,
+        hidden_size: int,
+        num_heads: int,
+        qkv_type: str
+    ) -> Tuple[torch.Tensor, str, int]:
+        """
+        Helper for fused QKV: apply head reduction to a single Q/K/V block.
+
+        Args:
+            grad_sq: Squared gradients for one Q/K/V block (hidden_size, hidden_size)
+            hidden_size: Model hidden size
+            num_heads: Number of heads
+            qkv_type: 'q', 'k', or 'v' for the block type
+
+        Returns:
+            (group_fisher, group_type, num_groups)
+        """
+        # For fused QKV blocks, each is (hidden_size, hidden_size)
+        # We can't separate heads, so use row-wise chunking like Qwen
+        head_dim = hidden_size // num_heads
+        group_fisher = grad_sq.sum(dim=1) if grad_sq.dim() > 1 else grad_sq
+
+        # Split rows into head groups
+        num_groups = min(num_heads, grad_sq.shape[0])
+        if grad_sq.shape[0] % num_groups == 0:
+            chunk_size = grad_sq.shape[0] // num_groups
+            group_fisher = grad_sq.reshape(num_groups, chunk_size, -1).sum(dim=[1, 2])
+            return group_fisher, f'head_{qkv_type}', num_groups
+
+        # If chunking doesn't work evenly, return as-is (will be treated as single group)
+        return group_fisher, f'head_{qkv_type}', 1
 
     def _reduce_embedding(
         self,
