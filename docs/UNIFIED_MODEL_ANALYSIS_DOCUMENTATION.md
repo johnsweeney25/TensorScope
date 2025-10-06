@@ -198,10 +198,13 @@ class UnifiedConfig:
     compute_loss_landscape: bool = False      # 2D loss landscape
 
     # ========== Fisher Information ==========
-    fisher_n_samples: int = 1000              # Samples for Fisher
-    fisher_method: str = "empirical"          # "empirical" or "exact"
-    compute_fisher_eigenvalues: bool = True   # Lanczos eigenvalues
-    fisher_top_k: int = 20                    # Top K eigenvalues
+    fisher_n_samples: int = 1000              # Samples for Fisher estimation
+    fisher_method: str = "empirical"          # "empirical" (recommended) or "exact"
+    fisher_batch_size: int = 128              # Batch size for Fisher (H100-optimized)
+    compute_fisher_eigenvalues: bool = True   # Enable advanced method comparison (KFAC/Lanczos)
+    fisher_top_k: int = 20                    # Top K eigenvalues for Lanczos
+    enable_qkov_interference: bool = True     # Enable circuit-level interference analysis
+    enable_cross_task_conflicts: bool = True  # Enable sample-level conflict detection
 
     # ========== Loss Landscape ==========
     loss_landscape_n_points: int = 25         # Grid resolution (25×25)
@@ -245,10 +248,20 @@ config = UnifiedConfig(
     compute_fisher=True
 )
 
-# Full analysis config
+# Full analysis config with Fisher enhancements
 config = UnifiedConfig(
     model_name="Qwen/Qwen2.5-Math-1.5B-Instruct",
-    compute_all=True,
+    compute_fisher=True,
+    compute_qkov=True,  # Enable QKOV interference analysis
+
+    # Fisher-specific settings
+    fisher_batch_size=128,           # H100-optimized for Fisher
+    fisher_n_samples=1000,           # Samples for Fisher estimation
+    compute_fisher_eigenvalues=True, # Enable method comparison
+    enable_qkov_interference=True,   # Circuit-level interference
+    enable_cross_task_conflicts=True, # Sample-level conflicts
+
+    # General settings
     batch_size=32,
     seed=42,
     output_dir="./results"
@@ -258,6 +271,7 @@ config = UnifiedConfig(
 config = UnifiedConfig(
     model_name="Qwen/Qwen2.5-Math-1.5B-Instruct",
     batch_size=16,
+    fisher_batch_size=64,  # Reduce Fisher batch size for memory
     max_batch_size=64,
     aggressive_cleanup=True,
     compute_loss_landscape=True,
@@ -337,7 +351,7 @@ all_results = analyzer.analyze_model(model_path)
 
 ## Metric Categories
 
-### 1. Fisher Information & Hessian (`ICLRMetrics`)
+### 1. Fisher Information & Hessian (`ICLRMetrics`, `BombshellMetrics`)
 
 **Enabled by**: `compute_fisher=True`
 
@@ -345,27 +359,35 @@ all_results = analyzer.analyze_model(model_path)
 - `fisher_information`: Empirical Fisher Information Matrix
   - `trace`: Sum of diagonal elements
   - `eigenvalues`: Top K eigenvalues (via Lanczos)
-  - `condition_number`: Max eigenvalue / min eigenvalue
+  - `condition_number`: Optimization difficulty metric
   - `effective_rank`: Number of significant eigenvalues
 
-- `hessian_eigenvalues`: Hessian spectrum (curvature)
-  - `top_eigenvalues`: Largest eigenvalues
-  - `bottom_eigenvalues`: Smallest eigenvalues
-  - `trace`: Sum of eigenvalues
-  - `sharpness`: Related to generalization
+- `fisher_importance`: Parameter importance scores per task
+- `fisher_overlap`: Task interference quantification
+- `qkov_interference`: Circuit-level conflict detection (if enabled)
+
+**7-Phase Analysis Pipeline**:
+1. Fisher collection (Welford accumulation, optional behavioral grouping)
+2. Importance computation and task comparison
+3. Pruning mask generation
+4. Mask overlap analysis
+5. Cross-task conflict detection
+6. QKOV interference analysis
+7. Method comparison (Group/KFAC/Lanczos/Spectral)
 
 **Configuration**:
 ```python
 config = UnifiedConfig(
     compute_fisher=True,
-    fisher_n_samples=1000,           # More samples = better estimate
-    fisher_method="empirical",       # "empirical" or "exact"
-    compute_fisher_eigenvalues=True, # Enable Lanczos
-    fisher_top_k=20                  # Top K eigenvalues
+    fisher_batch_size=128,           # Batch size for Fisher
+    fisher_n_samples=1000,           # Samples for estimation
+    compute_fisher_eigenvalues=True, # Enable method comparison
+    enable_qkov_interference=True,   # Circuit-level analysis
+    enable_cross_task_conflicts=True # Sample-level conflicts
 )
 ```
 
-**Batch Size**: Uses `batch_size` (default: 32)
+**See also**: `docs/FISHER_DOCUMENTATION.md` for complete Fisher guide
 
 ### 2. Loss Landscape (`ICLRMetrics`)
 
@@ -1286,13 +1308,17 @@ config = UnifiedConfig(
 
     # Enable key metrics
     compute_fisher=True,
+    compute_qkov=True,  # Enable QKOV interference analysis
     compute_loss_landscape=True,
     compute_gradients=True,
 
-    # Fisher settings
-    fisher_n_samples=1000,
-    compute_fisher_eigenvalues=True,
-    fisher_top_k=20,
+    # Fisher settings (enhanced)
+    fisher_batch_size=128,           # H100-optimized for Fisher
+    fisher_n_samples=1000,           # Samples for Fisher estimation
+    compute_fisher_eigenvalues=True, # Enable method comparison (KFAC/Lanczos)
+    fisher_top_k=20,                 # Top K eigenvalues for Lanczos
+    enable_qkov_interference=True,   # Circuit-level interference
+    enable_cross_task_conflicts=True, # Sample-level conflicts
 
     # Loss landscape settings
     loss_landscape_n_points=25,
@@ -1318,17 +1344,30 @@ config = UnifiedConfig(
 print("Analyzing checkpoints...")
 results = analyze_models(checkpoints, config)
 
-# Extract metrics
+# Extract metrics (enhanced with Fisher improvements)
 fisher_traces = []
+fisher_condition_numbers = []
+qk_interference_scores = []
 roughnesses = []
 gradient_norms = []
 
 for checkpoint in checkpoints:
     model_results = results.models[checkpoint]
 
-    # Fisher trace
+    # Enhanced Fisher metrics
     fisher = model_results.metrics["fisher_information"]
     fisher_traces.append(fisher["trace"])
+    fisher_condition_numbers.append(fisher.get("condition_number", 1.0))
+
+    # QKOV interference (new with our enhancements)
+    if "qkov_interference" in model_results.metrics:
+        qkov = model_results.metrics["qkov_interference"]
+        # Average interference across behavioral head types
+        interference_scores = []
+        for block in ['Q', 'K', 'V', 'O']:
+            if block in qkov and 'layer_head_avg' in qkov[block]:
+                interference_scores.append(np.mean(qkov[block]['layer_head_avg']))
+        qk_interference_scores.append(np.mean(interference_scores) if interference_scores else 0.0)
 
     # Loss landscape roughness
     landscape = model_results.metrics["loss_landscape_2d"]
@@ -1338,29 +1377,40 @@ for checkpoint in checkpoints:
     gradients = model_results.metrics["gradient_flow"]
     gradient_norms.append(np.mean(gradients["mean_gradient_norm"]))
 
-# Plot results
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+# Plot results (enhanced with Fisher improvements)
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
 # Fisher trace
-axes[0].plot(range(1, len(checkpoints)+1), fisher_traces, 'o-')
-axes[0].set_xlabel("Checkpoint")
-axes[0].set_ylabel("Fisher Trace")
-axes[0].set_title("Fisher Information During Training")
-axes[0].grid(True)
+axes[0, 0].plot(range(1, len(checkpoints)+1), fisher_traces, 'o-', color='blue')
+axes[0, 0].set_xlabel("Checkpoint")
+axes[0, 0].set_ylabel("Fisher Trace")
+axes[0, 0].set_title("Fisher Information During Training")
+axes[0, 0].grid(True)
+
+# Fisher condition number (optimization difficulty)
+axes[0, 1].plot(range(1, len(checkpoints)+1), fisher_condition_numbers, 'o-', color='red')
+axes[0, 1].set_xlabel("Checkpoint")
+axes[0, 1].set_ylabel("Condition Number")
+axes[0, 1].set_title("Fisher Condition Number (Optimization Difficulty)")
+axes[0, 1].grid(True)
+
+# QKOV interference (circuit-level conflicts)
+if qk_interference_scores and any(s > 0 for s in qk_interference_scores):
+    axes[1, 0].plot(range(1, len(checkpoints)+1), qk_interference_scores, 'o-', color='green')
+    axes[1, 0].set_xlabel("Checkpoint")
+    axes[1, 0].set_ylabel("QKOV Interference")
+    axes[1, 0].set_title("Circuit-Level Task Interference")
+    axes[1, 0].grid(True)
+else:
+    axes[1, 0].text(0.5, 0.5, "QKOV Interference\n(Not Available)", ha='center', va='center', transform=axes[1, 0].transAxes)
+    axes[1, 0].set_title("QKOV Interference")
 
 # Loss landscape roughness
-axes[1].plot(range(1, len(checkpoints)+1), roughnesses, 'o-')
-axes[1].set_xlabel("Checkpoint")
-axes[1].set_ylabel("Roughness")
-axes[1].set_title("Loss Landscape Smoothness")
-axes[1].grid(True)
-
-# Gradient norms
-axes[2].plot(range(1, len(checkpoints)+1), gradient_norms, 'o-')
-axes[2].set_xlabel("Checkpoint")
-axes[2].set_ylabel("Mean Gradient Norm")
-axes[2].set_title("Gradient Flow")
-axes[2].grid(True)
+axes[1, 1].plot(range(1, len(checkpoints)+1), roughnesses, 'o-', color='orange')
+axes[1, 1].set_xlabel("Checkpoint")
+axes[1, 1].set_ylabel("Roughness")
+axes[1, 1].set_title("Loss Landscape Smoothness")
+axes[1, 1].grid(True)
 
 plt.tight_layout()
 plt.savefig("./icml_analysis/training_metrics.pdf")
@@ -1368,10 +1418,16 @@ plt.show()
 
 print("\n✅ Analysis complete!")
 print(f"Results saved to: {config.output_dir}")
+print("\n📊 Key Insights:")
+print(f"  • Fisher trace evolution: {fisher_traces[0]:.2e} → {fisher_traces[-1]:.2e}")
+print(f"  • Condition number: {fisher_condition_numbers[0]:.2f} → {fisher_condition_numbers[-1]:.2f}")
+if qk_interference_scores and any(s > 0 for s in qk_interference_scores):
+    print(f"  • QKOV interference: {qk_interference_scores[0]:.3f} → {qk_interference_scores[-1]:.3f}")
+print(f"  • Loss landscape roughness: {roughnesses[0]:.3f} → {roughnesses[-1]:.3f}")
 ```
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2025-09-30
-**Status**: ✅ Production Ready (ICML 2026)
+**Document Version**: 2.0  
+**Last Updated**: 2025-10-06  
+**Status**: ✅ Production Ready (ICLR 2026)
