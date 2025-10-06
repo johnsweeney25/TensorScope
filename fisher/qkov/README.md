@@ -29,6 +29,27 @@ where:
 
 **Key insight**: This uses contributions C_i for **diagnostic purposes only**. All Fisher-theoretic operations use Î_n, ensuring compliance with Cramér-Rao bounds (Contribution Safety Theorem, Section 3.2).
 
+## Normalization Modes
+
+QKOV supports multiple Fisher normalization strategies:
+
+### **behavioral** (Default)
+- Uses behaviorally-grouped Fisher for normalization
+- Provides circuit-level insights but may affect theoretical properties
+- Best for interpretable, circuit-aware interference analysis
+
+### **structural** (Theoretically Safest)
+- Uses structurally-grouped Fisher for normalization
+- Maintains theoretical validity of original QKOV methodology
+- Sacrifices circuit-level granularity for theoretical consistency
+
+### **hybrid** (Balanced Approach)
+- Combines behavioral and structural Fisher using geometric mean
+- Attempts to maintain theoretical validity while incorporating behavioral insights
+- Requires both behavioral and structural Fisher collectors
+
+**Recommendation**: Use **structural** mode for theoretical validity, **behavioral** mode for circuit-level insights, **hybrid** mode for research exploring the trade-off.
+
 ## Quick Start
 
 ```python
@@ -66,6 +87,62 @@ heatmap = metric.compute_heatmap(
     layers=[3, 4, 5],
     heads=range(12)
 )
+
+# Analyze results
+print(f"Most conflicted block: {heatmap['most_conflicted_block']}")
+```
+
+### Normalization Mode Examples
+
+#### **Structural Mode** (Theoretically Safest)
+```python
+# For theoretical validity (original QKOV methodology)
+structural_fisher = FisherCollector(
+    reduction='group',  # Standard structural grouping only
+    enable_cross_task_analysis=True
+)
+structural_fisher.collect_fisher(model, math_batch, task='math')
+
+# Use structural normalization for theoretical safety
+metric_structural = QKOVInterferenceMetric(
+    config, structural_fisher,
+    normalization_mode='structural'  # Theoretically safest
+)
+heatmap_structural = metric_structural.compute_heatmap('math', 'code')
+```
+
+#### **Hybrid Mode** (Balanced Approach)
+```python
+# For research exploring behavioral vs structural trade-offs
+behavioral_fisher = FisherCollector(reduction='group', enable_cross_task_analysis=True)
+structural_fisher = FisherCollector(reduction='group', enable_cross_task_analysis=True)
+
+behavioral_fisher.collect_fisher(model, math_batch, task='math')
+structural_fisher.collect_fisher(model, math_batch, task='math')
+
+# Hybrid normalization (theoretical validity + behavioral insights)
+metric_hybrid = QKOVInterferenceMetric(
+    config, behavioral_fisher,
+    normalization_mode='hybrid',
+    structural_fisher_collector=structural_fisher
+)
+heatmap_hybrid = metric_hybrid.compute_heatmap('math', 'code')
+```
+
+#### **Comparison and Validation**
+```python
+# Compare different normalization modes
+modes = {
+    'behavioral': heatmap,
+    'structural': heatmap_structural,
+    'hybrid': heatmap_hybrid
+}
+
+for mode_name, hm in modes.items():
+    print(f"{mode_name} mode:")
+    print(f"  Most conflicted: {hm['most_conflicted_block']}")
+    print(f"  Max interference: {hm['max_interference']:.4f}")
+```
 
 # 7. Statistical testing
 from fisher.qkov import QKOVStatistics
@@ -270,18 +347,23 @@ if enable_qkov_interference:
 
 ### Contribution Safety (Section 3.2)
 
-✅ **Compliant**:
-- C_i used only for diagnostic/variance decomposition
-- All Fisher-theoretic operations use Î_n
-- No CRB/EWC claims made from C_i
+| Mode | Compliance | Notes |
+|------|------------|-------|
+| **structural** | ✅ **Fully Compliant** | Uses standard Fisher grouping (original methodology) |
+| **hybrid** | ⚠️ **Partially Compliant** | Combines behavioral/structural - may affect statistical properties |
+| **behavioral** | ⚠️ **May Violate** | Uses behavioral Fisher grouping - theoretical concerns |
+
+**Note**: Compliance depends on Fisher computation method. Behavioral grouping may affect the theoretical properties assumed by the Contribution Safety Theorem.
 
 ### Statistical Rigor (Section 6)
 
-✅ **Implemented**:
+✅ **Implemented** (for all modes):
 - Permutation null hypothesis testing
 - Multiple testing correction (BH-FDR)
 - Effect size computation (Cohen's d)
 - Bootstrap resampling
+
+**Note**: Statistical tests may have different properties across normalization modes due to Fisher computation differences.
 
 ## Limitations
 

@@ -409,22 +409,38 @@ class QKOVInterferenceMetric:
         config: QKOVConfig,
         fisher_collector,  # FisherCollector instance
         epsilon: float = 1e-10,
-        ridge_lambda: float = 1e-8
+        ridge_lambda: float = 1e-8,
+        normalization_mode: str = 'behavioral',  # 'behavioral', 'structural', or 'hybrid'
+        structural_fisher_collector = None  # Alternative FisherCollector for hybrid mode
     ):
         """
-        Initialize interference metric.
+        Initialize interference metric with configurable normalization.
 
         Args:
             config: QK-OV configuration
-            fisher_collector: FisherCollector with EMA Fisher and contributions
+            fisher_collector: FisherCollector with EMA Fisher and contributions (behavioral-grouped)
             epsilon: Numerical stability for division
             ridge_lambda: Ridge regularization for Fisher
+            normalization_mode: 'behavioral' (default), 'structural', or 'hybrid'
+            structural_fisher_collector: FisherCollector for structural grouping (hybrid mode only)
         """
         self.config = config
         self.fisher_collector = fisher_collector
         self.epsilon = epsilon
         self.ridge_lambda = ridge_lambda
+        self.normalization_mode = normalization_mode
         self.indexer = QKOVIndexer(config)
+
+        # Setup Fisher data for normalization
+        if normalization_mode == 'hybrid':
+            if structural_fisher_collector is None:
+                raise ValueError("structural_fisher_collector required for hybrid normalization")
+            # Get structural Fisher for hybrid normalization
+            self.structural_fisher = structural_fisher_collector.get_group_fisher()
+        elif normalization_mode == 'structural':
+            # Use structural Fisher only (ignore behavioral Fisher)
+            self.structural_fisher = fisher_collector.get_group_fisher()
+        # For 'behavioral' mode, use the behavioral Fisher from fisher_collector
 
         # Cache for computed scores
         self._score_cache: Dict[str, float] = {}
@@ -482,8 +498,24 @@ class QKOVInterferenceMetric:
         # Add ridge regularization to Fisher
         I_n_regularized = I_n_bh.clamp_min(self.epsilon) + self.ridge_lambda
 
-        # Fisher-normalized contribution
-        normalized_contrib = C_i_bh / I_n_regularized
+        # Choose Fisher normalization based on mode
+        if self.normalization_mode == 'hybrid' and self.structural_fisher is not None:
+            # Hybrid normalization: combine behavioral and structural Fisher
+            # This maintains theoretical validity while incorporating behavioral insights
+            structural_I_n = self.indexer.slice_tensor(self.structural_fisher, layer, head, block, param_name)
+            structural_regularized = structural_I_n.clamp_min(self.epsilon) + self.ridge_lambda
+            # Geometric mean for balanced normalization
+            hybrid_fisher = torch.sqrt(I_n_regularized * structural_regularized)
+            fisher_for_normalization = hybrid_fisher
+        elif self.normalization_mode == 'structural':
+            # Use structural Fisher only (theoretically safest)
+            fisher_for_normalization = I_n_regularized
+        else:
+            # Behavioral normalization (default, may have theoretical issues)
+            fisher_for_normalization = I_n_regularized
+
+        # Apply normalization
+        normalized_contrib = C_i_bh / fisher_for_normalization
 
         # Inner product with |g_j|
         score = (normalized_contrib * g_j_bh.abs()).sum().item()
@@ -491,7 +523,10 @@ class QKOVInterferenceMetric:
         diagnostics = {
             'fisher_min': fisher_min,
             'contrib_norm': contrib_norm,
-            'grad_norm': grad_norm
+            'grad_norm': grad_norm,
+            'normalization_mode': self.normalization_mode,
+            'fisher_behavioral_min': I_n_bh.min().item(),
+            'fisher_regularized_min': fisher_for_normalization.min().item()
         }
 
         return score, diagnostics
