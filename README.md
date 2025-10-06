@@ -86,16 +86,11 @@
 
 ---
 
-
- 
-
----
-
 ## Unexplored Research Questions
 
-**The problem:** Testing relationships between metrics requires identical experimental conditions. Running separate experiments introduces confounds (different batches, seeds, hardware). Many algorithms exist in papers but lack production implementations.
+**The problem:** Testing relationships between metrics requires identical experimental conditions. Running separate experiments introduces confounds (different batches, seeds, hardware).
 
-**What this does:** Computes 80+ metrics in one run (same batch, seed, device) with statistical testing (p-values, FDR). Includes GPU-optimized implementations that scale to production models.
+**What this enables:** Cross-metric correlation discovery with statistical testing (p-values, FDR). All metrics computed under identical conditions (same batch, seed, device).
 
 ### Fisher × Superposition
 **Questions you can now investigate:**
