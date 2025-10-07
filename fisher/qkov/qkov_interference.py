@@ -3,15 +3,59 @@ QK-OV Block-Wise Interference Metric (Section 4.1)
 
 Implements the Fisher-normalized, head-resolved interference metric:
 
-    M^B_{ij,ℓ,h} = ⟨C_i|_{B,ℓ,h} / (Î_n|_{B,ℓ,h} + ε), |g_j||_{B,ℓ,h}⟩
+    M^B_{ij,ℓ,h} = Σ_{k ∈ B,ℓ,h} (C_{i,k} / (Î_{n,k} + ε)) · |g_{j,k}|
+                 = Σ_k (g²_{i,k} / (Î_k + ε)) · |g_{j,k}|
 
 where B ∈ {Q, K, V, O}, ℓ is layer index, h is head index.
 
-This bridges:
-- Per-sample contributions C_i from FisherCollector
-- EMA Fisher Î_n for normalization
-- Per-sample gradients g_j from cross-task analysis
-- QK-OV circuit structure from mechanistic analysis
+METRIC DESIGN (Important for Interpretation)
+---------------------------------------------
+This metric is **diagonal-Fisher, asymmetric, magnitude-weighted**:
+
+1. **Diagonal Fisher**: Uses elementwise squares C_i = g²_i (not full covariance g_i g_i^T)
+   - Computationally tractable for large models (O(p) vs O(p²))
+   - Standard in continual learning (EWC) and model merging
+
+2. **Asymmetric**: M_ij ≠ M_ji (uses C_i for normalization, |g_j| for magnitude)
+   - Directional interpretation: "how sample i stresses parameters when j updates them"
+   - Not a symmetric distance metric
+
+3. **Magnitude-weighted**: Uses |g_j| (unsigned gradients)
+   - Focuses on interference strength, not direction
+   - Does NOT distinguish synergy (+) from conflict (-)
+   - Use signed variants (see below) if you need ±interference
+
+4. **Task-A normalized**: Î computed from task A contributions only
+   - Reflects task A's parameter sensitivity distribution
+   - For symmetric analysis, pool Fisher from both tasks
+
+ALTERNATIVE METRICS (Ablations)
+--------------------------------
+For comparison or different use cases, consider:
+
+- **Signed**: M_ij = Σ (g_{i,k} · g_{j,k}) / Î_k
+  → Captures synergy (positive) vs conflict (negative)
+  → Requires storing signed gradients
+
+- **Symmetric**: M_ij = Σ sqrt(C_{i,k} · C_{j,k}) / Î_k
+  → M_ij = M_ji (treats both samples equally)
+  → Better for similarity analysis
+
+- **Full Fisher**: M_ij = g_i^T F^{-1} g_j
+  → Captures cross-parameter covariance
+  → Requires KFAC or low-rank approximation
+
+IMPLEMENTATION: CONTRIBUTION-BASED FISHER
+------------------------------------------
+This implementation computes Fisher Information from stored per-sample contributions:
+
+    Î_n ≈ (1/n) Σ_i C_i where C_i = (∇log p(x_i))²
+
+This approach:
+- Uses FULL parameter tensors (no group reduction)
+- Properly distinguishes Q/K/V/O blocks (stored before reduction)
+- Is theoretically valid (unbiased estimator of Fisher Information)
+- Requires Phase 1 to run with enable_cross_task_analysis=True
 
 THEORETICAL FOUNDATION
 ----------------------
@@ -19,12 +63,14 @@ Unlike task-level or parameter-level conflict metrics, this provides:
 1. Circuit-specific attribution (which attention mechanism conflicts)
 2. Sample-pair forensics (which specific examples interfere)
 3. Fisher-weighted importance (normalized by parameter sensitivity)
+4. Block-wise resolution (Q vs K vs V vs O distinction)
 
 REFERENCES
 ----------
 - Section 4.1 of paper: "From Contributions to Circuit-Level Interference"
 - Contribution Safety Theorem (Section 3.2): ensures C_i usage is valid
 - QK-OV pairing (mechanistic analysis): circuit taxonomy
+- Intern feedback: docs/PHASE6_INTERN_FEEDBACK_RESPONSE.md
 
 Author: ICLR 2026 Project
 """
@@ -410,38 +456,44 @@ class QKOVInterferenceMetric:
         fisher_collector,  # FisherCollector instance
         epsilon: float = 1e-10,
         ridge_lambda: float = 1e-8,
-        normalization_mode: str = 'behavioral',  # 'behavioral', 'structural', or 'hybrid'
-        structural_fisher_collector = None  # Alternative FisherCollector for hybrid mode
+        ridge_lambda_rel: float = 0.0,  # Relative ridge: λ = max(λ_min, λ_rel * median(Î))
+        min_samples_for_fisher: int = 10,  # Minimum samples to compute stable Fisher
+        normalize_gj: str = 'none'  # 'none' | 'per_token_mean' | 'per_token_sum'
     ):
         """
-        Initialize interference metric with configurable normalization.
+        Initialize interference metric with contribution-based Fisher.
 
         Args:
             config: QK-OV configuration
-            fisher_collector: FisherCollector with EMA Fisher and contributions (behavioral-grouped)
+            fisher_collector: FisherCollector with contribution_cache populated
             epsilon: Numerical stability for division
             ridge_lambda: Ridge regularization for Fisher
-            normalization_mode: 'behavioral' (default), 'structural', or 'hybrid'
-            structural_fisher_collector: FisherCollector for structural grouping (hybrid mode only)
+            ridge_lambda_rel: Relative ridge: λ = max(λ_min, λ_rel * median(Î))
+            min_samples_for_fisher: Minimum samples needed for stable Fisher estimation
+            normalize_gj: Gradient normalization for task B gradients
+                - 'none': No normalization (raw gradients)
+                - 'per_token_mean': Divide by sequence length (sequence-invariant)
+                - 'per_token_sum': Divide by total tokens (token-invariant)
         """
         self.config = config
         self.fisher_collector = fisher_collector
         self.epsilon = epsilon
         self.ridge_lambda = ridge_lambda
-        self.normalization_mode = normalization_mode
+        self.ridge_lambda_rel = ridge_lambda_rel
+        self.min_samples_for_fisher = min_samples_for_fisher
+        self.normalize_gj = normalize_gj
         self.indexer = QKOVIndexer(config)
 
-        # Setup Fisher data for normalization
-        if normalization_mode == 'hybrid':
-            if structural_fisher_collector is None:
-                raise ValueError("structural_fisher_collector required for hybrid normalization")
-            # Get structural Fisher for hybrid normalization
-            self.structural_fisher = structural_fisher_collector.get_group_fisher()
-        elif normalization_mode == 'structural':
-            # Use structural Fisher only (ignore behavioral Fisher)
-            self.structural_fisher = fisher_collector.get_group_fisher()
-        # For 'behavioral' mode, use the behavioral Fisher from fisher_collector
+        # Verify that contribution_cache is available
+        if not hasattr(fisher_collector, 'contribution_cache'):
+            raise ValueError(
+                "FisherCollector must have contribution_cache enabled. "
+                "Set enable_cross_task_analysis=True when initializing."
+            )
 
+        # Cache for computed Fisher tensors (to avoid recomputing)
+        self._fisher_cache: Dict[Tuple[str, str], torch.Tensor] = {}
+        
         # Cache for computed scores
         self._score_cache: Dict[str, float] = {}
 
@@ -449,6 +501,79 @@ class QKOVInterferenceMetric:
                        sample_j: int, layer: int, head: int, block: str) -> str:
         """Generate cache key for memoization."""
         return f"{task_a}:{sample_i}_{task_b}:{sample_j}_L{layer}H{head}{block}"
+
+    def _compute_fisher_from_contributions(
+        self,
+        task: str,
+        param_name: str
+    ) -> torch.Tensor:
+        """
+        Compute Fisher Information from stored per-sample contributions.
+
+        Fisher Information Matrix: I = E[(∇log p(x))²]
+        
+        Our contribution_cache stores: C_i = (∇log p(x_i))² for each sample i
+        Therefore: I ≈ (1/n) Σ_i C_i (sample mean estimator)
+
+        This approach:
+        - Uses FULL parameter tensors (no group reduction)
+        - Properly distinguishes Q/K/V/O blocks (stored before reduction)
+        - Is theoretically valid (unbiased estimator of Fisher)
+        - Has variance O(1/n) that decreases with more samples
+
+        Args:
+            task: Task identifier
+            param_name: Parameter name
+
+        Returns:
+            Fisher tensor with shape matching the parameter (e.g., [4096, 4096])
+
+        Raises:
+            ValueError: If insufficient samples or parameter not found
+        """
+        # Check cache first
+        cache_key = (task, param_name)
+        if cache_key in self._fisher_cache:
+            return self._fisher_cache[cache_key]
+
+        # Collect contributions for this parameter across all samples
+        # Schema: contribution_cache[task][sample_key][param_name]
+        contributions = []
+        
+        task_dict = self.fisher_collector.contribution_cache.get(task, {})
+        for sample_key, contribs in task_dict.items():
+            if param_name in contribs:
+                contributions.append(contribs[param_name])
+
+        if not contributions:
+            raise ValueError(
+                f"No contributions found for task='{task}', param='{param_name}'. "
+                f"Ensure Phase 1 ran with enable_cross_task_analysis=True."
+            )
+
+        n_samples = len(contributions)
+        if n_samples < self.min_samples_for_fisher:
+            logger.warning(
+                f"Only {n_samples} samples for {param_name} (recommended: {self.min_samples_for_fisher}+). "
+                f"Fisher estimate may have high variance."
+            )
+
+        # Stack contributions and compute mean: I ≈ E[C_i]
+        # Force fp32 on CPU for numerically stable averaging
+        # (contributions may be stored in fp16/bf16)
+        contributions_fp32 = [c.detach().to(dtype=torch.float32, device='cpu') 
+                              for c in contributions]
+        fisher_full = torch.stack(contributions_fp32, dim=0).mean(dim=0)
+
+        # Cache for reuse
+        self._fisher_cache[cache_key] = fisher_full
+
+        logger.debug(
+            f"Computed Fisher from {n_samples} samples for {param_name}: "
+            f"shape {fisher_full.shape}, range [{fisher_full.min():.2e}, {fisher_full.max():.2e}]"
+        )
+
+        return fisher_full
 
     def compute_block_head_score(
         self,
@@ -464,9 +589,9 @@ class QKOVInterferenceMetric:
         Compute M^B_{ij,ℓ,h} = ⟨C_i / (Î_n + ε), |g_j|⟩ for a single block/head.
 
         Args:
-            contrib: Contribution C_i (full parameter)
-            grad: Gradient g_j (full parameter)
-            fisher: EMA Fisher Î_n (full parameter)
+            contrib: Contribution C_i (full parameter tensor)
+            grad: Gradient g_j (full parameter tensor)
+            fisher: Fisher Î_n (full parameter tensor from contributions)
             layer: Layer index
             head: Head index
             block: 'Q', 'K', 'V', or 'O'
@@ -474,7 +599,7 @@ class QKOVInterferenceMetric:
 
         Returns:
             Tuple of (score, diagnostics_dict)
-            - score: Scalar interference score
+            - score: Scalar interference score M^B_{ij,ℓ,h}
             - diagnostics: Dict with contrib_norm, grad_norm, fisher_min for debugging
         """
         # Device/dtype safety: ensure all tensors on same device & fp32
@@ -485,48 +610,58 @@ class QKOVInterferenceMetric:
         G_full = grad.detach().to(dtype=torch.float32, device=device)
         F_full = fisher.detach().to(dtype=torch.float32, device=device)
 
-        # Slice to block/head
+        # Slice to block/head using QK-OV-aware indexer
         C_i_bh = self.indexer.slice_tensor(C_full, layer, head, block, param_name)
         g_j_bh = self.indexer.slice_tensor(G_full, layer, head, block, param_name)
         I_n_bh = self.indexer.slice_tensor(F_full, layer, head, block, param_name)
 
-        # Diagnostic info
+        # Shape validation (catch slicing bugs early)
+        assert C_i_bh.shape == g_j_bh.shape == I_n_bh.shape, (
+            f"Shape mismatch for {param_name} L{layer}H{head} {block}: "
+            f"C_i={C_i_bh.shape}, g_j={g_j_bh.shape}, I_n={I_n_bh.shape}"
+        )
+
+        # Diagnostic info (before regularization)
         fisher_min = I_n_bh.min().item()
         contrib_norm = C_i_bh.norm().item()
         grad_norm = g_j_bh.norm().item()
 
-        # Add ridge regularization to Fisher
-        I_n_regularized = I_n_bh.clamp_min(self.epsilon) + self.ridge_lambda
-
-        # Choose Fisher normalization based on mode
-        if self.normalization_mode == 'hybrid' and self.structural_fisher is not None:
-            # Hybrid normalization: combine behavioral and structural Fisher
-            # This maintains theoretical validity while incorporating behavioral insights
-            structural_I_n = self.indexer.slice_tensor(self.structural_fisher, layer, head, block, param_name)
-            structural_regularized = structural_I_n.clamp_min(self.epsilon) + self.ridge_lambda
-            # Geometric mean for balanced normalization
-            hybrid_fisher = torch.sqrt(I_n_regularized * structural_regularized)
-            fisher_for_normalization = hybrid_fisher
-        elif self.normalization_mode == 'structural':
-            # Use structural Fisher only (theoretically safest)
-            fisher_for_normalization = I_n_regularized
+        # Add ridge regularization to Fisher for numerical stability
+        # Elementwise ridge (not matrix operation): rescues tiny values
+        if self.ridge_lambda_rel > 0:
+            # Relative ridge: λ = max(λ_min, λ_rel * median(Î))
+            fisher_median = I_n_bh.median().item()
+            ridge_lambda_applied = max(self.ridge_lambda, self.ridge_lambda_rel * fisher_median)
         else:
-            # Behavioral normalization (default, may have theoretical issues)
-            fisher_for_normalization = I_n_regularized
+            ridge_lambda_applied = self.ridge_lambda
 
-        # Apply normalization
-        normalized_contrib = C_i_bh / fisher_for_normalization
+        I_n_regularized = I_n_bh.clamp_min(self.epsilon) + ridge_lambda_applied
 
-        # Inner product with |g_j|
-        score = (normalized_contrib * g_j_bh.abs()).sum().item()
+        # Apply Fisher normalization: C_i / I_n
+        normalized_contrib = C_i_bh / I_n_regularized
+
+        # Apply gradient normalization for g_j (task B gradients)
+        g_j_normalized = g_j_bh.abs()  # Default: no normalization
+        if self.normalize_gj == 'per_token_mean':
+            # Divide by sequence length (sequence-invariant)
+            seq_len = g_j_bh.shape[0] if len(g_j_bh.shape) > 0 else 1
+            g_j_normalized = g_j_bh.abs() / max(1, seq_len)
+        elif self.normalize_gj == 'per_token_sum':
+            # Divide by total tokens (token-invariant)
+            total_tokens = g_j_bh.numel()
+            g_j_normalized = g_j_bh.abs() / max(1, total_tokens)
+
+        # Compute interference score: ⟨C_i / I_n, |g_j|⟩
+        score = (normalized_contrib * g_j_normalized).sum().item()
 
         diagnostics = {
             'fisher_min': fisher_min,
+            'fisher_max': I_n_bh.max().item(),
             'contrib_norm': contrib_norm,
             'grad_norm': grad_norm,
-            'normalization_mode': self.normalization_mode,
-            'fisher_behavioral_min': I_n_bh.min().item(),
-            'fisher_regularized_min': fisher_for_normalization.min().item()
+            'fisher_regularized_min': I_n_regularized.min().item(),
+            'ridge_lambda_applied': ridge_lambda_applied,
+            'normalize_gj': self.normalize_gj
         }
 
         return score, diagnostics
@@ -558,12 +693,13 @@ class QKOVInterferenceMetric:
         scores = {}
 
         # Get contributions for sample i from task A
-        if not hasattr(self.fisher_collector, 'contribution_cache'):
-            raise ValueError("FisherCollector must have contribution_cache enabled")
-
-        task_a_contribs = self.fisher_collector.contribution_cache.get(
-            f"{task_a}_{sample_i}", {}
-        )
+        # Schema: contribution_cache[task][sample_key][param_name]
+        task_a_dict = self.fisher_collector.contribution_cache.get(task_a, {})
+        task_a_contribs = task_a_dict.get(f"{task_a}_{sample_i}", {})
+        
+        if not task_a_contribs:
+            logger.warning(f"No contributions found for {task_a}_{sample_i}")
+            return {block: 0.0 for block in ['Q', 'K', 'V', 'O']}
 
         # Get gradients for sample j from task B
         if hasattr(self.fisher_collector, 'gradient_manager'):
@@ -571,17 +707,13 @@ class QKOVInterferenceMetric:
                 task_b, sample_j
             )
         else:
-            # Fallback: compute on-the-fly if needed
             logger.warning("No gradient_manager found; scores may be incomplete")
             task_b_grads = {}
 
-        # Get EMA Fisher
-        fisher_ema = self.fisher_collector.fisher_ema
-
-        # Find parameters for each block
-        # Note: Use a representative parameter dict (e.g., from fisher_ema)
+        # Use contribution_cache as reference for finding parameters
+        # (fisher_ema has group-reduced tensors, contribution_cache has full tensors)
         for block in ['Q', 'K', 'V', 'O']:
-            param_name = self.indexer.find_param_name(layer, block, fisher_ema)
+            param_name = self.indexer.find_param_name(layer, block, task_a_contribs)
 
             if param_name is None:
                 logger.warning(f"Could not find parameter for L{layer} {block}")
@@ -589,10 +721,8 @@ class QKOVInterferenceMetric:
                 continue
 
             # Check if we have all required data
-            if (param_name not in task_a_contribs or
-                param_name not in task_b_grads or
-                param_name not in fisher_ema):
-                logger.debug(f"Missing data for {param_name}, skipping")
+            if param_name not in task_a_contribs or param_name not in task_b_grads:
+                logger.debug(f"Missing contribution or gradient for {param_name}, skipping")
                 scores[block] = 0.0
                 continue
 
@@ -603,11 +733,19 @@ class QKOVInterferenceMetric:
                 scores[block] = self._score_cache[cache_key]
                 continue
 
+            # Compute Fisher from contributions (not from fisher_ema!)
+            try:
+                fisher_full = self._compute_fisher_from_contributions(task_a, param_name)
+            except ValueError as e:
+                logger.warning(f"Could not compute Fisher for {param_name}: {e}")
+                scores[block] = 0.0
+                continue
+
             # Compute score
             score, diagnostics = self.compute_block_head_score(
                 contrib=task_a_contribs[param_name],
                 grad=task_b_grads[param_name],
-                fisher=fisher_ema[param_name],
+                fisher=fisher_full,  # Use contribution-based Fisher
                 layer=layer,
                 head=head,
                 block=block,
@@ -619,7 +757,10 @@ class QKOVInterferenceMetric:
 
             # Log numerical health warnings
             if diagnostics['fisher_min'] < self.epsilon * 10:
-                logger.debug(f"L{layer}H{head} {block}: Fisher min={diagnostics['fisher_min']:.2e} (may be ill-conditioned)")
+                logger.debug(
+                    f"L{layer}H{head} {block}: Fisher min={diagnostics['fisher_min']:.2e} "
+                    f"(may be ill-conditioned)"
+                )
 
         return scores
 
@@ -653,8 +794,9 @@ class QKOVInterferenceMetric:
             heads = list(range(self.config.num_heads))
 
         # Get available samples
-        task_a_samples = list(self.fisher_collector.contribution_cache.keys())
-        task_a_samples = [k for k in task_a_samples if k.startswith(f"{task_a}_")]
+        # Schema: contribution_cache[task][sample_key][param_name]
+        task_a_dict = self.fisher_collector.contribution_cache.get(task_a, {})
+        task_a_samples = list(task_a_dict.keys())
         task_a_samples = task_a_samples[:max_samples_per_task]
 
         if hasattr(self.fisher_collector, 'gradient_manager'):
@@ -668,6 +810,22 @@ class QKOVInterferenceMetric:
         n_samples_b = len(task_b_samples)
         n_layers = len(layers)
         n_heads = len(heads)
+
+        # Guard: empty task_b samples
+        if n_samples_b == 0:
+            logger.warning(
+                f"No samples available for task_b='{task_b}'. "
+                f"Ensure gradient_manager has stored gradients for this task."
+            )
+            # Return empty structure
+            return {
+                block: {
+                    'scores': np.zeros((n_samples_a, 0, n_layers, n_heads)),
+                    'layer_head_avg': np.zeros((n_layers, n_heads)),
+                    'top_conflicts': []
+                }
+                for block in ['Q', 'K', 'V', 'O']
+            }
 
         # Initialize result structure
         results = {}
@@ -708,9 +866,18 @@ class QKOVInterferenceMetric:
             top_conflicts = []
             for idx in flat_idx:
                 i, j, l, h = np.unravel_index(idx, scores.shape)
+                
+                # Extract TRUE sample IDs (not matrix indices)
+                true_sample_i = int(task_a_samples[i].split('_')[-1])
+                # task_b_samples might be ints or strings depending on gradient_manager
+                if isinstance(task_b_samples[j], str):
+                    true_sample_j = int(task_b_samples[j].split('_')[-1])
+                else:
+                    true_sample_j = int(task_b_samples[j])
+                
                 top_conflicts.append({
-                    'sample_i': int(i),
-                    'sample_j': int(j),
+                    'sample_i': true_sample_i,
+                    'sample_j': true_sample_j,
                     'layer': layers[l],
                     'head': heads[h],
                     'score': float(scores[i, j, l, h])

@@ -79,7 +79,7 @@ class AdvancedFisherCollector(FisherCollector):
         self.kfac_update_freq = kfac_update_freq
         self.damping = damping
 
-        # K-FAC handler - use centralized implementation
+        # K-FAC handler - use centralized implementation with task support
         if use_kfac:
             from fisher.kfac_utils import KFACNaturalGradient
             self.kfac_handler = KFACNaturalGradient(
@@ -89,12 +89,15 @@ class AdvancedFisherCollector(FisherCollector):
                 use_gpu_eigh=True,
                 show_progress=kfac_show_progress
             )
-            # Keep references for backward compatibility
+            # Task-specific KFAC factors: {task_name: {layer_name: factors}}
+            self.kfac_factors_by_task = {}
+            # Keep backward compatibility with single task
             self.kfac_factors = self.kfac_handler.kfac_factors
             self.kfac_update_count = 0
             self.kfac_inv_cache = self.kfac_handler.inv_cache
         else:
             self.kfac_handler = None
+            self.kfac_factors_by_task = {}
             self.kfac_factors = {}
             self.kfac_update_count = 0
             self.kfac_inv_cache = {}
@@ -226,7 +229,8 @@ class AdvancedFisherCollector(FisherCollector):
         self,
         model: nn.Module,
         batch: Dict[str, torch.Tensor],
-        fisher_grads: Optional[Dict] = None
+        fisher_grads: Optional[Dict] = None,
+        task_name: Optional[str] = None
     ):
         """
         Update K-FAC factors using centralized implementation.
@@ -234,6 +238,12 @@ class AdvancedFisherCollector(FisherCollector):
         K-FAC approximates Fisher as: F ≈ A ⊗ G
         where A = E[a*a^T] (input activation covariance)
               G = E[g*g^T] (pre-activation gradient covariance)
+              
+        Args:
+            model: Neural network model
+            batch: Input batch
+            fisher_grads: Optional precomputed gradients
+            task_name: Optional task identifier for task-specific factors
         """
         if self.kfac_handler is None:
             logger.warning("K-FAC not enabled. Set use_kfac=True in constructor.")
@@ -241,6 +251,11 @@ class AdvancedFisherCollector(FisherCollector):
 
         # Use centralized KFAC implementation
         self.kfac_handler.collect_kfac_factors(model, batch)
+
+        # Store task-specific factors if task_name provided
+        if task_name is not None:
+            self.kfac_factors_by_task[task_name] = self.kfac_handler.kfac_factors.copy()
+            logger.debug(f"Stored KFAC factors for task: {task_name}")
 
         # Update references for backward compatibility
         self.kfac_factors = self.kfac_handler.kfac_factors
@@ -250,7 +265,8 @@ class AdvancedFisherCollector(FisherCollector):
     def get_kfac_natural_gradient(
         self,
         model: nn.Module,
-        compute_grad: bool = True
+        compute_grad: bool = True,
+        task_name: Optional[str] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Compute natural gradient using centralized K-FAC implementation.
@@ -261,6 +277,7 @@ class AdvancedFisherCollector(FisherCollector):
         Args:
             model: Model with computed gradients
             compute_grad: If True, compute gradients first
+            task_name: Optional task identifier for task-specific factors
 
         Returns:
             Dictionary of natural gradients per parameter
@@ -274,8 +291,20 @@ class AdvancedFisherCollector(FisherCollector):
             if param.grad is not None:
                 gradients[name] = param.grad.clone()
 
-        # Use centralized implementation
-        return self.kfac_handler.compute_natural_gradient(gradients, model)
+        # Use task-specific factors if available
+        if task_name is not None and task_name in self.kfac_factors_by_task:
+            # Temporarily switch to task-specific factors
+            original_factors = self.kfac_handler.kfac_factors
+            self.kfac_handler.kfac_factors = self.kfac_factors_by_task[task_name]
+            try:
+                result = self.kfac_handler.compute_natural_gradient(gradients, model)
+            finally:
+                # Restore original factors
+                self.kfac_handler.kfac_factors = original_factors
+            return result
+        else:
+            # Use current factors (backward compatibility)
+            return self.kfac_handler.compute_natural_gradient(gradients, model)
 
     # ============= LANCZOS SPECTRUM METHODS =============
 

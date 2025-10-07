@@ -78,17 +78,60 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LanczosConfig:
-    """Configuration for Lanczos iteration."""
+    """
+    Configuration for Lanczos iteration.
+    
+    Args:
+        k: Number of eigenvalues to compute
+        max_iters: Maximum Lanczos iterations (typically 3*k)
+        tol: Convergence tolerance
+        reorth_mode: Reorthogonalization mode ('auto', 'full', 'selective', 'off')
+        reorth_period: Reorthogonalization frequency for selective mode
+        reorth_window: Window size for selective mode (0 = auto based on operator type)
+        dtype_compute: Computation dtype
+        dtype_tridiag: Tridiagonal matrix dtype
+        seed: Random seed for reproducibility
+        use_cuda_if_available: Whether to use CUDA if available
+        max_attempts: Max attempts with different random vectors
+        regularization: Diagonal regularization for PSD operators
+        regularization_mode: Regularization strategy ('off', 'fixed', 'relative', 'auto')
+        gc_every: GPU cache cleanup frequency (0 = smart defaults, -1 = never)
+        
+    TODO (Future Enhancements):
+        1. TrueGGN JVP-based implementation to avoid O(B*T*V) memory
+           - Current TrueGGNOperator builds (B*T, V) dummy weights → OOMs for LLM vocab
+           - Solution: Use JVP-based formulation with forward-mode AD
+           - Memory: O(B*T + params), not O(B*T*V)
+           
+        2. EmpiricalFisher vectorization with vmap/microbatch + no_sync() for DDP
+           - Current: Per-sample loop (slow for large batches)
+           - Optimization: Use vmap/microbatch vectorization + DDP no_sync()
+           - Add L2-norm clipping on grads before outer-products
+           
+        3. K-FAC eigenbasis application to avoid O(n²) materialization
+           - Current: Reconstruct dense A and G from eigendecomps: O(n²) memory
+           - Optimization: Apply in eigenbasis directly: O(n) memory
+           - Impact: 10x memory reduction for large layers
+           
+        4. Add params_filter API to scope analysis to specific layers
+           - Goal: Scope analysis to specific layers (e.g., attention blocks only)
+           - API: params_filter=lambda name, p: 'attention' in name
+           - Impact: Massively reduce memory for quick probes
+    """
     k: int = 10  # Number of eigenvalues to compute
     max_iters: int = 30  # Maximum Lanczos iterations (typically 3*k)
     tol: float = 1e-10  # Convergence tolerance
-    reorth_period: int = 5  # Reorthogonalization frequency (0 = full reorth)
+    reorth_mode: str = 'auto'  # 'auto' (adaptive), 'full', 'selective', or 'off'
+    reorth_period: int = 5  # Reorthogonalization frequency for selective mode
+    reorth_window: int = 0  # Window size for selective mode (0 = auto based on operator type)
     dtype_compute: torch.dtype = torch.float32  # Computation dtype
     dtype_tridiag: torch.dtype = torch.float64  # Tridiagonal matrix dtype
     seed: int = 42  # Random seed for reproducibility
     use_cuda_if_available: bool = True
     max_attempts: int = 3  # Max attempts with different random vectors
     regularization: float = 1e-8  # Diagonal regularization for PSD operators
+    regularization_mode: str = 'auto'  # 'off', 'fixed', 'relative', 'auto' (adaptive)
+    gc_every: int = 0  # GPU cache cleanup frequency (0 = smart defaults, -1 = never)
 
 
 class LinOp:
@@ -219,12 +262,14 @@ class HessianOperator(LinOp):
 
             try:
                 # Clear GPU cache before computation
-                if device.type == 'cuda':
+                dev = self.device
+                if dev and dev.type == 'cuda':
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
 
-                # Compute loss and gradients
-                loss = self.loss_fn()
+                # Compute loss and gradients (ensure autograd is active)
+                with torch.enable_grad():
+                    loss = self.loss_fn()
                 if not loss.requires_grad:
                     loss = loss.requires_grad_(True)
 
@@ -273,7 +318,8 @@ class HessianOperator(LinOp):
                 self.model.zero_grad(set_to_none=True)
 
                 # Clear CUDA cache AFTER deleting tensors
-                if device.type == 'cuda':
+                dev = self.device
+                if dev and dev.type == 'cuda':
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
 
@@ -284,7 +330,8 @@ class HessianOperator(LinOp):
                     logger.warning(f"OOM in Hessian computation: {e}")
                     logger.warning("Consider using GGN operator instead or reducing batch size further")
                     # Clear GPU memory and return zeros as fallback
-                    if device.type == 'cuda':
+                    dev = self.device
+                    if dev and dev.type == 'cuda':
                         torch.cuda.empty_cache()
                         torch.cuda.synchronize()
                     return [torch.zeros_like(vi) for vi in v]
@@ -324,21 +371,23 @@ class GGNOperator(LinOp):
 
         # Auto-detect mode based on loss type if requested
         if mode == 'auto':
-            # Check if we're using cross-entropy loss
-            # For CE, empirical Fisher = GGN, so use faster empirical
-            # For other losses, use true GGN
+            # CRITICAL THEORY FIX: For CE loss, prefer 'true' GGN (= true Fisher)
+            # - True Fisher: E_{y~p_θ}[∇log p(y) ∇log p(y)^T]
+            # - Empirical Fisher: uses actual labels (different away from optimum)
+            # - For CE with softmax: GGN = true Fisher (canonical link)
             try:
                 outputs = model(**batch)
                 if hasattr(outputs, 'loss') and 'labels' in batch:
-                    # Assume cross-entropy if we have labels
-                    self.mode = 'empirical'
-                    logger.debug("Auto-detected cross-entropy loss, using empirical GGN")
+                    # Use true GGN for CE (theoretically correct)
+                    self.mode = 'true'
+                    logger.debug("Auto-detected cross-entropy loss, using true GGN (= true Fisher)")
                 else:
                     self.mode = 'true'
                     logger.debug("Auto-detected non-CE loss, using true GGN")
             except:
-                self.mode = 'empirical'  # Default fallback
-                logger.debug("Could not auto-detect loss type, using empirical GGN")
+                # Fallback to empirical for speed if true fails
+                self.mode = 'empirical'
+                logger.debug("Could not auto-detect loss type, using empirical GGN as fallback")
 
         # Use true GGN implementation if requested
         if self.mode == 'true':
@@ -417,6 +466,19 @@ class TrueGGNOperator(LinOp):
     For cross-entropy loss, this equals the TRUE Fisher Information Matrix
     (expectation over model's predicted distribution), NOT the empirical Fisher
     (which uses gradients for actual labels).
+    
+    ⚠️ SCALABILITY WARNING (2025-10-07):
+    =====================================
+    Current implementation creates dummy_weights with shape (B*T, V) where V is vocab size.
+    This will OOM for LLMs with large vocabularies (V > ~10k on typical GPUs).
+    
+    TODO: Replace with JVP-based implementation that never materializes (B*T, V):
+    - Use functorch jvp() for forward-mode AD
+    - Compute (Jv) as logits-directional derivative
+    - Apply H_CE in class space without allocating V-dimensional vectors
+    - See: https://github.com/pytorch/functorch for JVP examples
+    
+    For now: Use 'empirical' mode for large vocab models, or reduce batch size.
     """
 
     def __init__(
@@ -432,6 +494,8 @@ class TrueGGNOperator(LinOp):
 
         For cross-entropy: GGN = True Fisher = E_y~p[∇log p(y) ∇log p(y)^T]
         This differs from empirical Fisher which uses actual labels.
+        
+        ⚠️  IMPORTANT: Will OOM for vocab_size > ~10k. Use 'empirical' mode for LLMs.
 
         Args:
             model: Neural network model
@@ -446,6 +510,22 @@ class TrueGGNOperator(LinOp):
         self.model = model
         self.batch = batch
         self.loss_type = loss_type
+        
+        # CRITICAL: Check vocab size to prevent OOM
+        # Run a test forward pass to check logits shape
+        with torch.no_grad():
+            test_outputs = model(**batch)
+            if hasattr(test_outputs, 'logits'):
+                test_logits = test_outputs.logits
+                vocab_size = test_logits.shape[-1]
+                batch_tokens = test_logits.shape[0] * (test_logits.shape[1] if test_logits.dim() > 2 else 1)
+                memory_gb = (batch_tokens * vocab_size * 4) / (1024**3)  # FP32 bytes
+                if vocab_size > 10000:
+                    logger.warning(
+                        f"⚠️  TrueGGNOperator: Large vocab_size={vocab_size} detected! "
+                        f"Will allocate ~{memory_gb:.1f} GB for dummy_weights. "
+                        f"Consider using 'empirical' mode or reducing batch size to avoid OOM."
+                    )
 
         def true_ggn_mv(v: List[torch.Tensor]) -> List[torch.Tensor]:
             """Compute true GGN-vector product: J^T H_output J v."""
@@ -561,7 +641,8 @@ class EmpiricalFisherOperator(LinOp):
         batch: Dict[str, torch.Tensor],
         params: Optional[List[torch.Tensor]] = None,
         device: Optional[torch.device] = None,
-        accumulation_steps: int = 1
+        accumulation_steps: int = 1,
+        disable_cache: bool = False
     ):
         """
         Initialize Empirical Fisher operator.
@@ -589,10 +670,14 @@ class EmpiricalFisherOperator(LinOp):
 
         # For large models (>1B params), never cache to save memory
         # For smaller models, cache only very small batches
-        if n_params > 1e9:
+        # But respect explicit disable_cache parameter
+        if disable_cache:
+            # Explicitly disabled caching for this operator
+            self.cached_grads = None
+        elif n_params > 1e9:
             # Never cache for large models
             self.cached_grads = None
-        elif batch_size <= 8:  # Reduced from 32
+        elif batch_size <= 4:  # Further reduced for memory safety on H100
             self.cached_grads = self._compute_per_sample_grads()
 
         def fisher_mv(v: List[torch.Tensor]) -> List[torch.Tensor]:
@@ -703,6 +788,36 @@ class KFACFisherOperator(LinOp):
         self.kfac_factors = kfac_factors
         self.model = model
         self.param_to_layer = self._build_param_to_layer_mapping()
+        # O(1) reverse lookup: param id -> name (avoids O(N²) in _get_param_name)
+        self._name_by_id = {id(p): n for n, p in self.model.named_parameters()}
+        
+        # Log K-FAC coverage statistics (unhandled params)
+        total_params = len(self._name_by_id)
+        handled_params = set()
+        unhandled_params = []
+        total_param_count = 0
+        unhandled_param_count = 0
+        
+        for param_name in self._name_by_id.values():
+            param = dict(self.model.named_parameters())[param_name]
+            total_param_count += param.numel()
+            layer_name = self.param_to_layer.get(param_name)
+            
+            if layer_name and layer_name in self.kfac_factors:
+                handled_params.add(param_name)
+            else:
+                unhandled_params.append(param_name)
+                unhandled_param_count += param.numel()
+        
+        coverage = len(handled_params) / total_params * 100 if total_params > 0 else 0
+        param_coverage = (total_param_count - unhandled_param_count) / total_param_count * 100 if total_param_count > 0 else 0
+        
+        logger.info(f"K-FAC coverage: {len(handled_params)}/{total_params} params ({coverage:.1f}%), "
+                   f"{total_param_count - unhandled_param_count}/{total_param_count} elements ({param_coverage:.1f}%)")
+        
+        if unhandled_params:
+            logger.warning(f"K-FAC missing factors for {len(unhandled_params)} params: {unhandled_params[:5]}"
+                          f"{'...' if len(unhandled_params) > 5 else ''}")
 
         def kfac_mv(v: List[torch.Tensor]) -> List[torch.Tensor]:
             """Compute K-FAC Fisher-vector product."""
@@ -764,11 +879,8 @@ class KFACFisherOperator(LinOp):
         return mapping
 
     def _get_param_name(self, param: torch.Tensor) -> str:
-        """Get parameter name from tensor."""
-        for name, p in self.model.named_parameters():
-            if p is param:
-                return name
-        return ""
+        """Get parameter name from tensor (O(1) lookup)."""
+        return self._name_by_id.get(id(param), "")
 
 
 def lanczos_algorithm(
@@ -931,148 +1043,233 @@ def lanczos_algorithm(
         norm = torch.sqrt(torch.tensor(norm_squared))
     v_curr = [vi / (norm + 1e-12) for vi in v_curr]
 
-    # Storage for Lanczos vectors (selective reorthogonalization)
-    # CRITICAL: Indefinite matrices (Hessian) need more vectors for orthogonality
-    # PSD matrices (Fisher/GGN) converge faster, can use fewer vectors
-    force_selective = n_params > 1e9 or op.is_psd
-
-    # Determine reorthogonalization strategy based on operator type
-    if op.is_psd:
-        # PSD matrices: 2-3 vectors sufficient (faster convergence)
-        reorth_window = 2
-        if config.reorth_period == 0:
-            logger.info(f"Using selective reorthogonalization for PSD operator {op.name}")
-            config.reorth_period = 5
-    else:
-        # Indefinite matrices (Hessian): Need more vectors for stability
-        # Trade-off: More vectors = better orthogonality but more memory
-        # For 1B+ params with Float32: 5 vectors = 5 × 6GB = 30GB
+    # Determine reorthogonalization strategy based on reorth_mode
+    # 'auto': Adaptive based on operator type and model size
+    # 'full': Full reorthogonalization (store all vectors)
+    # 'selective': Selective with sliding window
+    # 'off': No reorthogonalization (3-term recurrence only)
+    
+    if config.reorth_mode == 'auto':
+        # Adaptive strategy based on operator type and model size
         if n_params > 1e9:
-            reorth_window = 5  # Compromise for large models
+            # Large models: Force selective to avoid OOM
+            effective_mode = 'selective'
+            if verbose:
+                logger.info(f"Auto mode: Using selective reorth for large model ({n_params/1e9:.1f}B params)")
+        elif op.is_psd:
+            # PSD: Selective is usually sufficient (faster convergence)
+            effective_mode = 'selective'
         else:
-            reorth_window = 8  # Better orthogonality for smaller models
-        if config.reorth_period == 0:
-            logger.info(f"Using selective reorthogonalization for indefinite operator {op.name} (window={reorth_window})")
-            config.reorth_period = 3  # More frequent for indefinite matrices
-
-    if config.reorth_period == 0 and not force_selective:
-        # Full reorthogonalization - store all vectors (only for small indefinite matrices)
-        Q = [v_curr]
-        Q_window = None
+            # Indefinite (small): Full for better accuracy
+            effective_mode = 'full' if n_params < 1e8 else 'selective'
     else:
+        effective_mode = config.reorth_mode
+    
+    # Determine window size for selective mode
+    if config.reorth_window > 0:
+        reorth_window = config.reorth_window
+    else:
+        # Auto window size based on operator type
+        if op.is_psd:
+            reorth_window = 2  # PSD: 2-3 vectors sufficient
+        else:
+            # Indefinite: More vectors for stability
+            reorth_window = 5 if n_params > 1e9 else 8
+    
+    # Setup storage based on mode
+    if effective_mode == 'full':
+        # Full reorthogonalization - store all vectors
+        # CRITICAL: Q should start empty! We'll add vectors AFTER each iteration.
+        # Do NOT initialize with v_curr - that causes double-orthogonalization.
+        Q = []
+        Q_window = None
+        if verbose:
+            logger.info(f"Using full reorthogonalization (storing all Lanczos vectors)")
+    elif effective_mode == 'selective':
         # Selective reorthogonalization with sliding window
         Q = None  # Don't store all vectors
         Q_window = []  # Sliding window of recent vectors
-        if force_selective and config.reorth_period == 0:
-            logger.info(f"Forcing selective reorthogonalization for large model ({n_params/1e9:.1f}B params, window={reorth_window})")
-            config.reorth_period = 5  # Override to use selective
+        if verbose:
+            logger.info(f"Using selective reorthogonalization (window={reorth_window}, period={config.reorth_period})")
+    elif effective_mode == 'off':
+        # No reorthogonalization (3-term recurrence only)
+        Q = None
+        Q_window = None
+        if verbose:
+            logger.info(f"Reorthogonalization disabled (3-term recurrence only)")
+    else:
+        raise ValueError(f"Unknown reorth_mode: {effective_mode}. Must be 'auto', 'full', 'selective', or 'off'")
 
+    # High-precision helpers (defined once, not per iteration)
+    # NOTE: Keep on GPU throughout to avoid device sync per iteration
+    def _dot(x, y):
+        """High-precision dot product - casts to FP32 only for BF16 inputs.
+        Returns GPU tensor in FP64 for tridiagonal accumulation."""
+        acc = None
+        for xi, yi in zip(x, y):
+            # Only cast to FP32 if input is BF16 (to avoid precision loss from FP64→FP32)
+            if xi.dtype == torch.bfloat16:
+                val = (xi.to(torch.float32) * yi.to(torch.float32)).sum()
+            else:
+                val = (xi * yi).sum()
+            acc = val if acc is None else acc + val
+        # Keep as GPU tensor in FP64 - avoid device sync until final results
+        if torch.is_tensor(acc):
+            return acc.to(torch.float64)
+        return torch.tensor(float(acc), dtype=torch.float64)
+    
+    def _norm(x):
+        """High-precision norm - casts to FP32 only for BF16 inputs.
+        Returns GPU tensor in FP64 for tridiagonal accumulation."""
+        acc = None
+        for xi in x:
+            # Only cast to FP32 if input is BF16 (to avoid precision loss from FP64→FP32)
+            if xi.dtype == torch.bfloat16:
+                val = (xi.to(torch.float32)**2).sum()
+            else:
+                val = (xi**2).sum()
+            acc = val if acc is None else acc + val
+        # Keep as GPU tensor in FP64 - avoid device sync until final results
+        if torch.is_tensor(acc):
+            return torch.sqrt(acc.to(torch.float64))
+        return torch.tensor(np.sqrt(acc), dtype=torch.float64)
+    
     # Tridiagonal matrix elements (in high precision)
     T_diag = []
     T_offdiag = []
+    
+    # 3-term recurrence state (CRITICAL for correctness)
+    v_prev = None
+    beta_prev = 0.0
 
     converged = False
     for iteration in range(config.max_iters):
         # Matrix-vector product
         w = op.mv(v_curr)
 
-        # Memory cleanup for large models - more aggressive for ICML reproducibility
-        # Clean every 3 iterations for >1B param models, every 5 for smaller models
+        # Memory cleanup (opt-in via config.gc_every)
+        # gc_every = 0: smart defaults (3 for >1B, 5 for >500M, off otherwise)
+        # gc_every = -1: never clean
+        # gc_every > 0: clean every N iterations
         if device.type == 'cuda' and iteration > 0:
-            if n_params > 1e9 and iteration % 3 == 0:
-                # Very large models: clean frequently
+            should_clean = False
+            if config.gc_every == 0:
+                # Smart defaults
+                if n_params > 1e9 and iteration % 3 == 0:
+                    should_clean = True
+                elif n_params > 5e8 and iteration % 5 == 0:
+                    should_clean = True
+            elif config.gc_every > 0 and iteration % config.gc_every == 0:
+                should_clean = True
+            
+            if should_clean:
                 torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            elif n_params > 5e8 and iteration % 5 == 0:
-                # Large models: clean periodically
-                torch.cuda.empty_cache()
+                # Skip synchronize() by default - only needed for debugging peak memory
+                # torch.cuda.synchronize()
 
-        # Alpha (diagonal element)
-        alpha = sum((wi * vi).sum() for wi, vi in zip(w, v_curr))
-        if torch.is_tensor(alpha):
-            alpha = alpha.item()
+        # Alpha (diagonal element) - use high-precision accumulation
+        # CRITICAL: Accumulate in FP32 even for BF16 models
+        # α = v_i^T · (A·v_i), computed from ORIGINAL A·v_i
+        alpha = _dot(w, v_curr)
         T_diag.append(alpha)
 
-        # w = w - alpha * v_curr
+        # 3-term Lanczos recurrence: w = A·v_i - α_i·v_i - β_{i-1}·v_{i-1}
+        # CRITICAL: This is the core of Lanczos - must be done in this order!
+        # First subtract α·v_i
         w = [wi - alpha * vi for wi, vi in zip(w, v_curr)]
+        
+        # Then subtract β_{i-1}·v_{i-1} (3-term recurrence)
+        # This is REQUIRED for correct tridiagonalization
+        if v_prev is not None and beta_prev > 0:
+            w = [wi - beta_prev * vi for wi, vi in zip(w, v_prev)]
 
-        # Reorthogonalization strategy
-        if config.reorth_period == 0 and not force_selective:
+        # Reorthogonalization strategy (optional, for numerical stability)
+        if effective_mode == 'full' and Q is not None:
             # Full reorthogonalization against all previous vectors
-            # Only used for small models (<1B params) with indefinite matrices
-            for v_old in Q:
+            # CRITICAL: Don't reorthogonalize against v_prev (last vector in Q)
+            # because we already subtracted β*v_prev in the 3-term recurrence!
+            # Only reorthogonalize against v_0, v_1, ..., v_{i-2}
+            for v_old in Q[:-1] if len(Q) > 0 else []:  # Exclude last vector (v_prev)
                 dot = sum((wi * vi).sum() for wi, vi in zip(w, v_old))
                 w = [wi - dot * vi for wi, vi in zip(w, v_old)]
-        elif Q_window is not None and iteration % config.reorth_period == 0:
+        elif effective_mode == 'selective' and Q_window is not None and config.reorth_period > 0 and iteration % config.reorth_period == 0:
             # Selective reorthogonalization with sliding window
-            # This maintains better orthogonality than just using v_prev
-            # Always reorthogonalize against current vector first (essential for Lanczos)
-            dot = sum((wi * vi).sum() for wi, vi in zip(w, v_curr))
-            w = [wi - dot * vi for wi, vi in zip(w, v_curr)]
-
-            # Reorthogonalize against recent vectors in window
-            # For indefinite matrices: more vectors = better stability
-            # For PSD matrices: fewer vectors sufficient
+            # NOTE: Do NOT reorthogonalize against v_curr or v_prev - already handled by 3-term recurrence
+            # Only reorthogonalize against OLDER vectors for numerical stability
             for v_old in Q_window:
                 dot = sum((wi * vi).sum() for wi, vi in zip(w, v_old))
                 w = [wi - dot * vi for wi, vi in zip(w, v_old)]
 
                 # Early exit if w is already orthogonal (save compute)
-                # This is optional optimization for large windows
                 if abs(dot) < 1e-10:
                     break
+        # elif effective_mode == 'off': no reorthogonalization (3-term recurrence only)
 
-        # Beta (off-diagonal element)
-        beta = torch.sqrt(sum((wi**2).sum() for wi in w))
-        if torch.is_tensor(beta):
-            beta = beta.item()
+        # Beta (off-diagonal element) - use high-precision norm
+        # CRITICAL: Accumulate norm in FP32 even for BF16 models
+        beta = _norm(w)
 
-        # Check convergence
+        # Check convergence vs numerical breakdown
         if beta < config.tol:
-            converged = True
-            if verbose:
-                logger.info(f"Lanczos converged at iteration {iteration+1}")
-            break
+            # Distinguish between convergence and numerical breakdown
+            if iteration < config.k - 1:
+                # Too early to converge - likely numerical breakdown
+                if verbose:
+                    logger.warning(f"Numerical breakdown at iteration {iteration+1} (beta={beta:.2e}), continuing...")
+                # Don't break - continue with small beta
+                beta = max(beta, 1e-12)  # Prevent division by zero
+            else:
+                # Reasonable convergence after finding enough eigenvalues
+                converged = True
+                if verbose:
+                    logger.info(f"Lanczos converged at iteration {iteration+1}")
+                break
 
         if iteration < config.max_iters - 1:
             T_offdiag.append(beta)
 
         # Prepare for next iteration
-        if config.reorth_period == 0 and not force_selective:
+        v_next = [wi / (beta + 1e-12) for wi in w]
+        
+        if effective_mode == 'full' and Q is not None:
             # Full reorthogonalization - store all vectors
-            v_next = [wi / (beta + 1e-12) for wi in w]
-            Q.append(v_next)
-            v_curr = v_next
-        else:
+            # CRITICAL: Append v_curr (current vector v_i), NOT v_next (next vector v_{i+1})
+            # Q should contain [v_0, v_1, ..., v_i] when processing v_{i+1}
+            Q.append(v_curr)
+        elif effective_mode == 'selective' and Q_window is not None:
             # Selective reorthogonalization - maintain sliding window
-            v_next = [wi / (beta + 1e-12) for wi in w]
-
             # Add current vector to sliding window
-            if Q_window is not None:
-                Q_window.append(v_curr)
+            Q_window.append(v_curr)
 
-                # Maintain window size limit
-                # Remove oldest vector when window exceeds limit
-                if len(Q_window) > reorth_window:
-                    # Explicitly delete oldest vector to free memory
-                    old_vec = Q_window.pop(0)
-                    del old_vec
+            # Maintain window size limit
+            # Remove oldest vector when window exceeds limit
+            if len(Q_window) > reorth_window:
+                # Explicitly delete oldest vector to free memory
+                old_vec = Q_window.pop(0)
+                del old_vec
+        # elif effective_mode == 'off': no storage needed
 
-            v_curr = v_next
+        # Update 3-term recurrence state for next iteration
+        v_prev = v_curr
+        v_curr = v_next
+        beta_prev = beta
 
         # Explicitly delete w to free memory immediately
         del w
 
     # Build tridiagonal matrix in high precision
+    # Convert GPU tensors to CPU scalars (only one device sync here, not per iteration)
     n = len(T_diag)
     T = np.zeros((n, n), dtype=np.float64)
-    T[np.diag_indices(n)] = np.array(T_diag, dtype=np.float64)
+    T_diag_cpu = [t.cpu().item() if torch.is_tensor(t) else t for t in T_diag]
+    T[np.diag_indices(n)] = np.array(T_diag_cpu, dtype=np.float64)
 
     if len(T_offdiag) > 0:
         # Add off-diagonal elements (subdiagonal and superdiagonal)
-        m = min(len(T_offdiag), n-1)
-        T[range(m), range(1, m+1)] = np.array(T_offdiag[:m], dtype=np.float64)
-        T[range(1, m+1), range(m)] = np.array(T_offdiag[:m], dtype=np.float64)
+        T_offdiag_cpu = [t.cpu().item() if torch.is_tensor(t) else t for t in T_offdiag]
+        m = min(len(T_offdiag_cpu), n-1)
+        T[range(m), range(1, m+1)] = np.array(T_offdiag_cpu[:m], dtype=np.float64)
+        T[range(1, m+1), range(m)] = np.array(T_offdiag_cpu[:m], dtype=np.float64)
 
     # Regularization strategy for numerical stability
     # IMPORTANT: Regularization creates bias in eigenvalue estimates!
@@ -1080,46 +1277,70 @@ def lanczos_algorithm(
     # - Small eigenvalues: significant relative bias
     # - Large eigenvalues: negligible relative bias
     #
-    # Strategy:
-    # - PSD operators (Fisher/GGN): Add small regularization for numerical stability
-    #   Justification: Prevents issues with near-zero eigenvalues in ill-conditioned matrices
-    # - Indefinite operators (Hessian): NO regularization
-    #   Justification: Need accurate negative eigenvalues for pathology detection
+    # Strategy based on config.regularization_mode:
+    # - 'off': No regularization
+    # - 'fixed': Add config.regularization to all eigenvalues
+    # - 'relative': Add (diag_max * config.regularization) - scales with spectrum
+    # - 'auto': Adaptive based on condition number (default)
     regularization_applied = 0.0
-    if op.is_psd and config.regularization > 0:
-        # For PSD, only regularize if we have numerical instability indicators
-        # Check condition number from diagonal elements (rough estimate)
+    if op.is_psd:
         diag_max = np.max(np.abs(np.diag(T)))
         diag_min = np.min(np.abs(np.diag(T))) + 1e-12
-
-        # If condition number suggests ill-conditioning, apply relative regularization
-        if diag_max / diag_min > 1e12:
-            # Use relative regularization: scale by magnitude of spectrum
-            regularization_applied = diag_max * 1e-10  # Relative to largest eigenvalue
+        cond_estimate = diag_max / diag_min
+        
+        if config.regularization_mode == 'fixed':
+            # Fixed regularization from config
+            regularization_applied = config.regularization
             T[np.diag_indices(n)] += regularization_applied
             if verbose:
-                logger.warning(f"Applied regularization {regularization_applied:.2e} (relative to spectrum) for ill-conditioned PSD matrix")
-        # Otherwise, skip regularization to avoid unnecessary bias
+                logger.info(f"Applied fixed regularization {regularization_applied:.2e}")
+        
+        elif config.regularization_mode == 'relative':
+            # Relative to spectrum magnitude
+            regularization_applied = diag_max * config.regularization
+            T[np.diag_indices(n)] += regularization_applied
+            if verbose:
+                logger.info(f"Applied relative regularization {regularization_applied:.2e} (= {config.regularization:.2e} * λ_max)")
+        
+        elif config.regularization_mode == 'auto':
+            # Adaptive: only regularize if ill-conditioned
+            if cond_estimate > 1e12:
+                # Use relative regularization: scale by magnitude of spectrum
+                regularization_applied = diag_max * 1e-10
+                T[np.diag_indices(n)] += regularization_applied
+                if verbose:
+                    logger.warning(f"Applied auto regularization {regularization_applied:.2e} (cond={cond_estimate:.2e} > 1e12)")
+        
+        elif config.regularization_mode == 'off':
+            pass  # No regularization
+        else:
+            logger.warning(f"Unknown regularization_mode '{config.regularization_mode}', using 'off'")
+    # Indefinite operators (Hessian): NO regularization (need accurate negative eigenvalues)
 
-    # Compute eigenvalues with fallbacks
+    # Compute eigenvalues and eigenvectors with fallbacks
+    # NOTE: We need eigenvectors to compute Ritz residuals ||A v - λ v||
     eigenvalues = None
+    eigenvectors = None
     try:
         # Try numpy first (usually most stable)
-        eigenvalues = np.linalg.eigvalsh(T)
+        eigenvalues, eigenvectors = np.linalg.eigh(T)
     except np.linalg.LinAlgError:
         if verbose:
-            logger.warning("NumPy eigvalsh failed, trying torch...")
+            logger.warning("NumPy eigh failed, trying torch...")
         try:
             # Try torch
             T_torch = torch.from_numpy(T).to(torch.float64)
-            eigenvalues = torch.linalg.eigvalsh(T_torch).cpu().numpy()
+            eigenvalues, eigenvectors = torch.linalg.eigh(T_torch)
+            eigenvalues = eigenvalues.cpu().numpy()
+            eigenvectors = eigenvectors.cpu().numpy()
         except:
             if verbose:
-                logger.warning("Torch eigvalsh failed, trying SVD...")
+                logger.warning("Torch eigh failed, trying SVD...")
             try:
                 # Fallback to SVD
-                _, S, _ = np.linalg.svd(T)
+                U, S, Vt = np.linalg.svd(T)
                 eigenvalues = S
+                eigenvectors = U  # Left singular vectors
             except:
                 logger.error("All eigenvalue methods failed!")
                 return {
@@ -1128,13 +1349,19 @@ def lanczos_algorithm(
                     'iterations': iteration + 1
                 }
 
-    # Sort eigenvalues (ensure numpy array)
+    # Sort eigenvalues and eigenvectors (ensure numpy arrays)
     eigenvalues = np.array(eigenvalues) if not isinstance(eigenvalues, np.ndarray) else eigenvalues
-    eigenvalues = np.sort(eigenvalues)[::-1]  # Descending order
+    eigenvectors = np.array(eigenvectors) if not isinstance(eigenvectors, np.ndarray) else eigenvectors
+    
+    # Sort in descending order
+    sort_idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[sort_idx]
+    eigenvectors = eigenvectors[:, sort_idx]
 
     # Take top k
     k = min(config.k, len(eigenvalues))
     top_k = eigenvalues[:k]
+    top_k_vectors = eigenvectors[:, :k]
 
     # Convergence quality assessment
     # Check for potential numerical issues that affect result quality
@@ -1165,6 +1392,46 @@ def lanczos_algorithm(
         if symmetry_error > 1e-10:
             warnings_list.append(f"Tridiagonal matrix not symmetric (error={symmetry_error:.2e}), numerical instability detected")
 
+    # Compute Ritz residuals ||A v - λ v|| for quality assessment
+    # NOTE: Only possible when we have full Lanczos basis Q (full reorth mode)
+    # Ritz residuals quantify how well each (λ, v) approximates true eigenpairs
+    ritz_residuals = []
+    if Q is not None and len(Q) > 0:
+        # We have the full Lanczos basis - compute residuals for top-k
+        for i in range(k):
+            try:
+                # Ritz vector in original space: v = Q @ y where y is eigenvector in Lanczos basis
+                y = top_k_vectors[:, i]
+                
+                # Map to original space: v = sum(y[j] * Q[j])
+                v_ritz = None
+                for j, coeff in enumerate(y):
+                    if j < len(Q):
+                        if v_ritz is None:
+                            v_ritz = [coeff * qj for qj in Q[j]]
+                        else:
+                            v_ritz = [vj + coeff * qj for vj, qj in zip(v_ritz, Q[j])]
+                
+                if v_ritz is not None:
+                    # Compute A @ v
+                    Av = op.mv(v_ritz)
+                    
+                    # Compute λ * v
+                    lambda_v = [top_k[i] * vj for vj in v_ritz]
+                    
+                    # Residual: ||A v - λ v||
+                    residual_vec = [avj - lvj for avj, lvj in zip(Av, lambda_v)]
+                    residual_norm = np.sqrt(sum((rj**2).sum().item() for rj in residual_vec))
+                    ritz_residuals.append(float(residual_norm))
+                else:
+                    ritz_residuals.append(float('nan'))
+            except Exception as e:
+                if verbose:
+                    logger.warning(f"Failed to compute Ritz residual {i}: {e}")
+                ritz_residuals.append(float('nan'))
+    elif verbose and config.reorth_period != 0:
+        logger.debug("Ritz residuals not computed (selective reorthogonalization - Q not fully stored)")
+
     # Compute metrics based on operator type
     results = {
         'eigenvalues': top_k.tolist(),
@@ -1174,8 +1441,10 @@ def lanczos_algorithm(
         'converged': converged,
         'n_params': n_params,
         'seed': config.seed,
+        'reorth_mode': effective_mode,  # Actual reorthogonalization mode used
         'regularization_applied': float(regularization_applied),
         'warnings': warnings_list,  # Include quality warnings
+        'ritz_residuals': ritz_residuals if len(ritz_residuals) > 0 else None,  # ||A v - λ v|| per eigenpair
     }
 
     if len(top_k) > 0:
@@ -1187,18 +1456,19 @@ def lanczos_algorithm(
             if len(top_k) >= 2:
                 results['spectral_gap'] = float(top_k[0] - top_k[1])
 
-            # Find smallest positive eigenvalue for condition number
+            # Find smallest positive eigenvalue for Ritz condition number
+            # NOTE: This is condition number of Ritz subspace (top-k), NOT full matrix
             pos_eigs = top_k[top_k > config.tol]
             if len(pos_eigs) > 0:
-                results['condition_number'] = float(top_k[0] / pos_eigs[-1])
+                results['ritz_condition_number'] = float(top_k[0] / pos_eigs[-1])
             else:
-                results['condition_number'] = float('inf')
+                results['ritz_condition_number'] = float('inf')
 
-            # Effective rank
+            # Effective rank (of top-k Ritz values only)
             if np.all(top_k > 0):
                 p = top_k / np.sum(top_k)
                 entropy = -np.sum(p * np.log(p + 1e-12))
-                results['effective_rank'] = float(np.exp(entropy))
+                results['ritz_effective_rank'] = float(np.exp(entropy))
         else:
             # Indefinite (Hessian) metrics
             results['has_negative_eigenvalues'] = bool(np.any(top_k < -config.tol))
@@ -1207,6 +1477,25 @@ def lanczos_algorithm(
 
             # Sharpness score (largest absolute eigenvalue)
             results['sharpness_score'] = float(np.max(np.abs(top_k)))
+            
+            # Negative mass: fraction and weighted sum of negative eigenvalues
+            # This quantifies how much negative curvature the Hessian has
+            neg_eigs = top_k[top_k < -config.tol]
+            if len(neg_eigs) > 0:
+                # Fraction: count of negative / total
+                results['negative_fraction'] = float(len(neg_eigs) / len(top_k))
+                
+                # Weighted mass: sum of absolute values of negatives / sum of all absolute values
+                total_abs_mass = np.sum(np.abs(top_k))
+                neg_abs_mass = np.sum(np.abs(neg_eigs))
+                results['negative_mass'] = float(neg_abs_mass / (total_abs_mass + 1e-12))
+                
+                # Most negative eigenvalue (for saddle point analysis)
+                results['most_negative_eigenvalue'] = float(np.min(top_k))
+            else:
+                results['negative_fraction'] = 0.0
+                results['negative_mass'] = 0.0
+                results['most_negative_eigenvalue'] = 0.0
 
     if verbose:
         logger.info(f"Lanczos completed: {results.get('max_eigenvalue', 0):.4e} (max), "
@@ -1260,7 +1549,7 @@ def create_operator(
         return GGNOperator(model, batch, device=device, mode=ggn_mode)
 
     elif operator_type == 'empirical_fisher':
-        return EmpiricalFisherOperator(model, batch, device=device)
+        return EmpiricalFisherOperator(model, batch, device=device, disable_cache=True)
 
     elif operator_type == 'kfac' or operator_type == 'kfac_fisher':
         if kfac_factors is None:

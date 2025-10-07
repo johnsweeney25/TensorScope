@@ -260,7 +260,8 @@ Dictionary containing:
     'min_computed_eigenvalue': float,  # Smallest computed eigenvalue
     'condition_number': float,  # λ_max / λ_min (if positive)
     'effective_rank': float,  # exp(entropy of normalized eigenvalues)
-    'spectral_gap': float,  # λ₁ - λ₂
+    'spectral_gap': float,  # λ₁ - λ₂ (true gap)
+    'spectral_range': float,  # λ₁ - λ_k (full span of computed spectrum)
     'lanczos_iterations': int,  # Actual iterations performed
     'k_requested': int,  # Number of eigenvalues requested
     'k_computed': int,  # Number successfully computed

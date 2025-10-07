@@ -175,6 +175,24 @@ class FisherCollector:
         self.current_sample_id = {}  # Track sample IDs per task
         self.crlb_protected = crlb_protected  # CRLB safety flag
         self.store_sscs = False  # Explicitly track if storing SSCs
+        
+        # Enable contribution storage for QK-OV interference analysis (Phase 6)
+        # This stores per-sample C_i = g_i^2 for circuit-level forensics
+        # WARNING: Stores FULL parameter tensors (not group-reduced)
+        # Memory cost: ~50-100MB per parameter per sample
+        # For 768 samples × 50 params: ~2-4GB per task
+        self.store_sample_contributions = enable_cross_task_analysis
+        
+        if self.store_sample_contributions and enable_cross_task_analysis:
+            logger.info("Contribution storage enabled for QK-OV circuit analysis")
+            logger.info("  Memory impact: Stores full parameter tensors (not group-reduced)")
+            logger.info("  Estimated: ~2-4GB per task for 768 samples")
+        
+        # NOISE MITIGATION: Number of samples to average for contribution computation
+        # Setting > 1 reduces noise but loses per-sample granularity
+        # Default 1: true per-sample (noisy but maximally granular)
+        # Recommended 4-8: good balance between noise and granularity
+        self.contribution_averaging_window = 1  # Can be increased for noise reduction
 
         # Enhanced attention head analysis
         self.mechanistic_analyzer = None
@@ -604,32 +622,44 @@ class FisherCollector:
         for name, param in model.named_parameters():
             if name in gradient_accumulator:
                 grad = gradient_accumulator[name]
-                # Get group-reduced Fisher
+                
+                # === NOVEL: Store per-sample contributions BEFORE group reduction ===
+                # CRITICAL: Stage 6 (QK-OV) needs FULL parameter tensors for head slicing
+                # Must store BEFORE _reduce_to_groups() which changes tensor shape
+                if hasattr(self, 'store_sample_contributions') and self.store_sample_contributions:
+                    if task not in self.contribution_cache:
+                        self.contribution_cache[task] = {}  # Dict keyed by f"{task}_{sample_idx}"
+
+                    # For single-sample micro-batches, store the contribution
+                    if end_idx - start_idx == 1:
+                        # Convert to float32 for compatibility with bfloat16 gradients
+                        grad_f32 = grad.float() if grad.dtype == torch.bfloat16 else grad
+                        
+                        # Store FULL parameter gradient squared (not group-reduced!)
+                        # Stage 6 (QK-OV) will apply its own slicing later
+                        # Shape: [out_features, in_features] for Linear layers
+                        full_contribution = grad_f32.pow(2)
+                        
+                        # Normalize by total tokens for comparable magnitudes across batches
+                        # This is per-token contribution, not per-parameter
+                        normalized_contribution = full_contribution / max(1, total_active_tokens)
+                        
+                        # Create unique key for this sample and parameter
+                        sample_key = f"{task}_{start_idx}"
+                        if sample_key not in self.contribution_cache[task]:
+                            self.contribution_cache[task][sample_key] = {}
+                        
+                        # Store FULL tensor with parameter name as key (needed by QK-OV metric)
+                        # Memory cost: ~60MB per attention weight for 1.5B model
+                        self.contribution_cache[task][sample_key][name] = normalized_contribution.detach().cpu()
+                
+                # Get group-reduced Fisher (for Welford accumulation, not for QK-OV)
                 group_fisher, group_type, num_groups = self._reduce_to_groups(
                     name, grad, param.shape, model
                 )
 
                 # Normalize by active tokens
                 group_fisher = group_fisher / (total_active_tokens + 1e-8)
-
-                # === NOVEL: Store per-sample contributions for fine-grained analysis ===
-                # THIS is what enables "sample 7 conflicts with sample 23" claims!
-                if hasattr(self, 'store_sample_contributions') and self.store_sample_contributions:
-                    if task not in self.contribution_cache:
-                        self.contribution_cache[task] = []
-
-                    # For single-sample micro-batches, store the contribution
-                    if end_idx - start_idx == 1:
-                        # Convert to float32 for compatibility with bfloat16 gradients
-                        grad_f32 = grad.float() if grad.dtype == torch.bfloat16 else grad
-                        sample_contribution = {
-                            'sample_idx': start_idx,
-                            'batch_idx': getattr(self, 'current_batch_idx', 0),
-                            'grad_squared': grad_f32.pow(2).detach().cpu(),  # Store on CPU to save GPU memory
-                            'param_name': name,
-                            'group_type': group_type
-                        }
-                        self.contribution_cache[task].append(sample_contribution)
 
                 # Create stable key
                 key = self._make_key(task, name, group_type)
@@ -2201,9 +2231,11 @@ class FisherCollector:
             return {}
 
         # Detect conflicts
+        # ICLR: Use much larger comparison limit to avoid premature truncation
+        # This ensures we explore enough sample pairs to find meaningful conflicts
         conflicts = self.conflict_detector.detect_conflicts(
             task_a, task_b,
-            max_comparisons=max_conflicts * 10  # Check more to find top conflicts
+            max_comparisons=max_conflicts * 100  # Increased from 10x to 100x for comprehensive analysis
         )
 
         # Limit to top conflicts

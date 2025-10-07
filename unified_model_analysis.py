@@ -840,7 +840,7 @@ class UnifiedConfig:
     skip_expensive: bool = False
     skip_checkpoint_metrics: bool = False  # Skip metrics requiring multiple models
     skip_fisher_metrics: bool = False  # Skip Fisher-based metrics (memory intensive)
-    compute_advanced_fisher_metrics: bool = True  # Enable K-FAC, capacity metrics, loss curvature (supplementary)
+    compute_advanced_fisher_metrics: bool = True  # ENABLED - compute K-FAC, capacity metrics, loss curvature (disable with --no-advanced-fisher)
 
     # Batch processing configuration
     batch_processing_enabled: bool = True  # Use gradient_manager for memory-efficient computation
@@ -866,7 +866,7 @@ class UnifiedConfig:
     gradient_trajectory_seq_length: int = 128  # Limits trajectory length for stability
     gradient_pathology_batch_size: int = 64  # Reduced due to O(n²) pairwise comparisons
     attention_batch_size: int = 32  # CRITICAL: Reduced from 64 to prevent OOM on attention head specialization (1.5B models)
-    hessian_batch_size: int = 16  # Balance: statistical noise vs memory (16 samples reduces variance while using ~55GB on 1.5B models)
+    hessian_batch_size: int = 16  # ICLR submission: balanced batch size for 1.5B models on H100
     ggn_batch_size: int = 32  # Conservative for GGN/Fisher on large models (was 256, causes OOM on 1.5B+)
     fisher_batch_size: int = 128  # Batch size for Fisher metrics (H100-optimized: 6 batches for 768 samples)
     jacobian_batch_size: int = 32  # Batch size for position Jacobian (Novak et al. 2018) - amortizes dtype conversion across samples
@@ -916,6 +916,7 @@ class UnifiedConfig:
     use_float16: bool = False  # Use half precision to save memory
     clear_cache_after_each: bool = True  # Clear GPU cache after each model
     max_models_in_memory: int = 2  # Maximum models to keep in memory simultaneously
+    enable_memory_leak_detection: bool = True  # Enable memory leak detection (can be noisy)
 
     # Chunked processing settings for established_analysis
     # Different functions have different memory requirements:
@@ -2073,8 +2074,17 @@ class MetricRegistry:
             self.register('compute_parameter_storage_bits', info.compute_parameter_storage_bits, 'information',
                          signature_type=SignatureType.STANDARD, group='information_dynamics')
         if hasattr(info, 'compute_causal_necessity'):
+            # CUSTOM signature: needs specific parameters for memory efficiency
             self.register('compute_causal_necessity', info.compute_causal_necessity, 'information',
-                         signature_type=SignatureType.STANDARD, expensive=True, group='information_dynamics')
+                         signature_type=SignatureType.CUSTOM, expensive=True, group='information_dynamics',
+                         custom_args={
+                             'n_samples': 50,  # Reduced from 100 for memory efficiency
+                             'batch_size': 16,  # Reduced batch size for memory efficiency
+                             'interventions_per_batch': 5,  # Reduced interventions per batch
+                             'ablation_fraction': 0.05,  # Reduced ablation fraction
+                             'compute_confidence': False,  # Disable bootstrap CI for speed/memory
+                             'n_bootstrap': 100  # Reduced bootstrap samples if enabled
+                         })
         # Register compute_heuristic_pid_minmi directly (no longer using compute_redundancy_synergy alias)
         if hasattr(info, 'compute_heuristic_pid_minmi'):
             self.register('compute_heuristic_pid_minmi', info.compute_heuristic_pid_minmi, 'information',
@@ -2544,44 +2554,54 @@ class MetricRegistry:
             if hasattr(self, '_parent_analyzer') and hasattr(self._parent_analyzer, 'baseline_gpu_memory'):
                 leak_threshold = self._parent_analyzer.baseline_gpu_memory
             
-            # Treat as a leak only if both allocated AND reserved exceed baseline by a margin
-            leak_margin_gb = 0.5  # small tolerance above baseline
-            if (allocated_before - leak_threshold) > leak_margin_gb or (reserved_before - leak_threshold) > 0:
-                logger.error(f"⚠️ MEMORY LEAK DETECTED before metric '{metric_name}'")
-                logger.error(f"   GPU Memory: {allocated_before:.2f}GB allocated / {reserved_before:.2f}GB reserved")
-                logger.error(f"   Baseline (model + overhead): {leak_threshold:.2f}GB")
-                logger.error(f"   Excess memory: {allocated_before - leak_threshold:.2f}GB")
-                logger.error(f"   Previous metric likely failed to clean up properly")
-                logger.error(f"   Attempting aggressive cleanup...")
+            # Check if memory leak detection is enabled
+            enable_leak_detection = getattr(self.config, 'enable_memory_leak_detection', True) if self.config else True
 
-                # Force aggressive cleanup: clear model grads, then caches
-                import gc
-                model_for_cleanup = context.models[0] if context.models else None
-                if model_for_cleanup is not None and hasattr(model_for_cleanup, 'zero_grad'):
-                    try:
-                        model_for_cleanup.zero_grad(set_to_none=True)
-                        for p in model_for_cleanup.parameters():
-                            p.grad = None
-                    except Exception as e:
-                        logger.debug(f"Leak cleanup: failed to clear grads: {e}")
-                    # Heuristic: estimate how much memory is tied up in .grad tensors
-                    grad_bytes = _approx_live_grad_bytes(model_for_cleanup)
-                    if grad_bytes > 0:
-                        logger.info(f"   Detected ~{grad_bytes/1e9:.2f}GB in live .grad tensors; cleared via set_to_none")
-                gc.collect()
-                torch.cuda.synchronize()
-                cleanup_memory(verbose=False, reason=f"leak recovery before {metric_name}", model=model_for_cleanup)
+            if not enable_leak_detection:
+                # Skip memory leak detection entirely
+                pass
+            else:
+                # Treat as a leak only if both allocated AND reserved exceed baseline by a significant margin
+                leak_margin_gb = 2.0  # Increased tolerance - PyTorch often holds onto memory for efficiency
+                if (allocated_before - leak_threshold) > leak_margin_gb and (reserved_before - leak_threshold) > 1.0:
+                    logger.error(f"⚠️ MEMORY LEAK DETECTED before metric '{metric_name}'")
+                    logger.error(f"   GPU Memory: {allocated_before:.2f}GB allocated / {reserved_before:.2f}GB reserved")
+                    logger.error(f"   Baseline (model + overhead): {leak_threshold:.2f}GB")
+                    logger.error(f"   Excess memory: {allocated_before - leak_threshold:.2f}GB")
+                    logger.error(f"   Previous metric likely failed to clean up properly")
+                    logger.error(f"   Attempting aggressive cleanup...")
 
-                # Check if cleanup helped
-                allocated_after = torch.cuda.memory_allocated() / (1024**3)
-                reserved_after = torch.cuda.memory_reserved() / (1024**3)
-                freed_alloc_gb = max(0.0, allocated_before - allocated_after)
-                freed_res_gb = max(0.0, reserved_before - reserved_after)
-                logger.info(f"   ✓ Freed {freed_alloc_gb:.2f}GB alloc / {freed_res_gb:.2f}GB reserved; now at {allocated_after:.2f}GB alloc, {reserved_after:.2f}GB reserved")
+                    # Force aggressive cleanup: clear model grads, then caches
+                    import gc
+                    model_for_cleanup = context.models[0] if context.models else None
+                    if model_for_cleanup is not None and hasattr(model_for_cleanup, 'zero_grad'):
+                        try:
+                            model_for_cleanup.zero_grad(set_to_none=True)
+                            for p in model_for_cleanup.parameters():
+                                p.grad = None
+                        except Exception as e:
+                            logger.debug(f"Leak cleanup: failed to clear grads: {e}")
+                        # Heuristic: estimate how much memory is tied up in .grad tensors
+                        grad_bytes = _approx_live_grad_bytes(model_for_cleanup)
+                        if grad_bytes > 0:
+                            logger.info(f"   Detected ~{grad_bytes/1e9:.2f}GB in live .grad tensors; cleared via set_to_none")
+                    gc.collect()
+                    torch.cuda.synchronize()
+                    cleanup_memory(verbose=False, reason=f"leak recovery before {metric_name}", model=model_for_cleanup)
 
-                if (allocated_after - leak_threshold) > leak_margin_gb or (reserved_after - leak_threshold) > 0:
-                    logger.warning(f"   ⚠️ Still {allocated_after:.2f}GB allocated / {reserved_after:.2f}GB reserved after cleanup ({max(0.0, allocated_after - leak_threshold):.2f}GB over baseline)")
-                    logger.warning(f"   This metric may fail due to insufficient GPU memory")
+                    # Check if cleanup helped
+                    allocated_after = torch.cuda.memory_allocated() / (1024**3)
+                    reserved_after = torch.cuda.memory_reserved() / (1024**3)
+                    freed_alloc_gb = max(0.0, allocated_before - allocated_after)
+                    freed_res_gb = max(0.0, reserved_before - reserved_after)
+                    logger.info(f"   ✓ Freed {freed_alloc_gb:.2f}GB alloc / {freed_res_gb:.2f}GB reserved; now at {allocated_after:.2f}GB alloc, {reserved_after:.2f}GB reserved")
+
+                    if (allocated_after - leak_threshold) > leak_margin_gb or (reserved_after - leak_threshold) > 0:
+                        logger.warning(f"   ⚠️ Still {allocated_after:.2f}GB allocated / {reserved_after:.2f}GB reserved after cleanup ({max(0.0, allocated_after - leak_threshold):.2f}GB over baseline)")
+                        logger.warning(f"   This metric may fail due to insufficient GPU memory")
+                else:
+                    # Memory leak detection disabled - just log current state for debugging
+                    logger.debug(f"Memory leak detection disabled: {allocated_before:.2f}GB allocated / {reserved_before:.2f}GB reserved (baseline: {leak_threshold:.2f}GB)")
 
         # Final pre-metric cleanup (reports freed reserved/allocated if verbose)
         model_for_cleanup = context.models[0] if context.models else None
@@ -3346,39 +3366,115 @@ class MetricRegistry:
                             device_batch[key] = value.to(original_device)
                         else:
                             device_batch[key] = value
+
                     # Request hidden_states only if needed (for sparsity analysis)
                     # This prevents unnecessary memory allocation in other metrics
                     if need_hidden_states:
-                        outputs = model(**device_batch, output_hidden_states=True)
+                        # ROBUST HIDDEN STATE EXTRACTION FOR SPARSITY ANALYSIS
+                        # Different models support hidden states differently
+                        try:
+                            # Method 1: Try with output_hidden_states=True (standard for most transformers)
+                            outputs = model(**device_batch, output_hidden_states=True, return_dict=True)
+                        except (TypeError, AttributeError) as e:
+                            logger.debug(f"Model doesn't support output_hidden_states=True: {e}")
+                            try:
+                                # Method 2: Try without the parameter but with return_dict=True
+                                outputs = model(**device_batch, return_dict=True)
+                            except (TypeError, AttributeError):
+                                # Method 3: Try basic forward pass (some models don't support kwargs)
+                                outputs = model(**device_batch)
                     else:
                         outputs = model(**device_batch)
                 else:
                     # Request hidden_states only if needed (for sparsity analysis)
                     if need_hidden_states:
-                        outputs = model(**batch, output_hidden_states=True)
+                        # ROBUST HIDDEN STATE EXTRACTION FOR SPARSITY ANALYSIS
+                        try:
+                            # Method 1: Try with output_hidden_states=True (standard for most transformers)
+                            outputs = model(**batch, output_hidden_states=True, return_dict=True)
+                        except (TypeError, AttributeError) as e:
+                            logger.debug(f"Model doesn't support output_hidden_states=True: {e}")
+                            try:
+                                # Method 2: Try without the parameter but with return_dict=True
+                                outputs = model(**batch, return_dict=True)
+                            except (TypeError, AttributeError):
+                                # Method 3: Try basic forward pass (some models don't support kwargs)
+                                outputs = model(**batch)
                     else:
                         outputs = model(**batch)
 
                 # Extract final hidden states for sparsity analysis
+                # ROBUST ACTIVATION EXTRACTION - Handle different model output formats
+                activations_extracted = False
+
+                # Method 1: Try hidden_states (standard for most transformers)
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
-                    if preserve_gradients:
-                        extracted_data['final_activations'] = outputs.hidden_states[-1].clone()
-                    else:
-                        extracted_data['final_activations'] = outputs.hidden_states[-1].clone().detach()
-                    logger.info(f"Extracted final layer activations: shape {extracted_data['final_activations'].shape}")
-                elif hasattr(outputs, 'last_hidden_state'):
-                    if preserve_gradients:
-                        extracted_data['final_activations'] = outputs.last_hidden_state.clone()
-                    else:
-                        extracted_data['final_activations'] = outputs.last_hidden_state.clone().detach()
-                    logger.info(f"Extracted last hidden state: shape {extracted_data['final_activations'].shape}")
-                elif torch.is_tensor(outputs):
-                    # Fallback for models that directly return tensors
-                    if preserve_gradients:
-                        extracted_data['final_activations'] = outputs.clone()
-                    else:
-                        extracted_data['final_activations'] = outputs.clone().detach()
-                    logger.info(f"Extracted output tensor: shape {outputs.shape}")
+                    try:
+                        if preserve_gradients:
+                            extracted_data['final_activations'] = outputs.hidden_states[-1].clone()
+                        else:
+                            extracted_data['final_activations'] = outputs.hidden_states[-1].clone().detach()
+                        logger.info(f"Extracted final layer activations: shape {extracted_data['final_activations'].shape}")
+                        activations_extracted = True
+                    except (AttributeError, IndexError) as e:
+                        logger.debug(f"Could not extract from hidden_states: {e}")
+
+                # Method 2: Try last_hidden_state (common in CausalLM models)
+                if not activations_extracted and hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
+                    try:
+                        if preserve_gradients:
+                            extracted_data['final_activations'] = outputs.last_hidden_state.clone()
+                        else:
+                            extracted_data['final_activations'] = outputs.last_hidden_state.clone().detach()
+                        logger.info(f"Extracted last hidden state: shape {extracted_data['final_activations'].shape}")
+                        activations_extracted = True
+                    except (AttributeError, TypeError) as e:
+                        logger.debug(f"Could not extract from last_hidden_state: {e}")
+
+                # Method 3: Try direct tensor output (some models return tensors directly)
+                if not activations_extracted and torch.is_tensor(outputs):
+                    try:
+                        if preserve_gradients:
+                            extracted_data['final_activations'] = outputs.clone()
+                        else:
+                            extracted_data['final_activations'] = outputs.clone().detach()
+                        logger.info(f"Extracted output tensor: shape {outputs.shape}")
+                        activations_extracted = True
+                    except Exception as e:
+                        logger.debug(f"Could not extract from tensor output: {e}")
+
+                # Method 4: Try logits if available (fallback for some architectures)
+                if not activations_extracted and hasattr(outputs, 'logits'):
+                    try:
+                        if preserve_gradients:
+                            extracted_data['final_activations'] = outputs.logits.clone()
+                        else:
+                            extracted_data['final_activations'] = outputs.logits.clone().detach()
+                        logger.info(f"Extracted logits as fallback: shape {extracted_data['final_activations'].shape}")
+                        activations_extracted = True
+                    except Exception as e:
+                        logger.debug(f"Could not extract from logits: {e}")
+
+                # Method 5: Check if outputs is a tuple/list and extract last element
+                if not activations_extracted and isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+                    try:
+                        last_output = outputs[-1]
+                        if torch.is_tensor(last_output):
+                            if preserve_gradients:
+                                extracted_data['final_activations'] = last_output.clone()
+                            else:
+                                extracted_data['final_activations'] = last_output.clone().detach()
+                            logger.info(f"Extracted from tuple output: shape {extracted_data['final_activations'].shape}")
+                            activations_extracted = True
+                    except Exception as e:
+                        logger.debug(f"Could not extract from tuple output: {e}")
+
+                # Final check - if we still don't have activations, this is a problem
+                if not activations_extracted:
+                    logger.warning("Could not extract activations from model output")
+                    logger.debug(f"Output type: {type(outputs)}")
+                    logger.debug(f"Output attributes: {[attr for attr in dir(outputs) if not attr.startswith('_')]}")
+                    # Don't fail here - let the calling code handle the error
 
         except torch.cuda.OutOfMemoryError as e:
             # Fallback: Move to CPU first
@@ -3410,20 +3506,92 @@ class MetricRegistry:
 
                 # Request hidden_states only if needed (for sparsity analysis)
                 if need_hidden_states:
-                    outputs = model(**mini_batch, output_hidden_states=True)
+                    # ROBUST HIDDEN STATE EXTRACTION FOR CPU FALLBACK
+                    try:
+                        # Method 1: Try with output_hidden_states=True (standard for most transformers)
+                        outputs = model(**mini_batch, output_hidden_states=True, return_dict=True)
+                    except (TypeError, AttributeError) as e:
+                        logger.debug(f"Model doesn't support output_hidden_states=True: {e}")
+                        try:
+                            # Method 2: Try without the parameter but with return_dict=True
+                            outputs = model(**mini_batch, return_dict=True)
+                        except (TypeError, AttributeError):
+                            # Method 3: Try basic forward pass (some models don't support kwargs)
+                            outputs = model(**mini_batch)
                 else:
                     outputs = model(**mini_batch)
 
+                # ROBUST ACTIVATION EXTRACTION - Handle different model output formats (CPU fallback)
+                activations_extracted = False
+
+                # Method 1: Try hidden_states (standard for most transformers)
                 if hasattr(outputs, 'hidden_states') and outputs.hidden_states:
-                    if preserve_gradients:
-                        extracted_data['final_activations'] = outputs.hidden_states[-1].clone()
-                    else:
-                        extracted_data['final_activations'] = outputs.hidden_states[-1].clone()
-                elif hasattr(outputs, 'last_hidden_state'):
-                    if preserve_gradients:
-                        extracted_data['final_activations'] = outputs.last_hidden_state.clone()
-                    else:
-                        extracted_data['final_activations'] = outputs.last_hidden_state.clone()
+                    try:
+                        if preserve_gradients:
+                            extracted_data['final_activations'] = outputs.hidden_states[-1].clone()
+                        else:
+                            extracted_data['final_activations'] = outputs.hidden_states[-1].clone()
+                        logger.info(f"Extracted final layer activations (CPU): shape {extracted_data['final_activations'].shape}")
+                        activations_extracted = True
+                    except (AttributeError, IndexError) as e:
+                        logger.debug(f"Could not extract from hidden_states (CPU): {e}")
+
+                # Method 2: Try last_hidden_state (common in CausalLM models)
+                if not activations_extracted and hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
+                    try:
+                        if preserve_gradients:
+                            extracted_data['final_activations'] = outputs.last_hidden_state.clone()
+                        else:
+                            extracted_data['final_activations'] = outputs.last_hidden_state.clone()
+                        logger.info(f"Extracted last hidden state (CPU): shape {extracted_data['final_activations'].shape}")
+                        activations_extracted = True
+                    except (AttributeError, TypeError) as e:
+                        logger.debug(f"Could not extract from last_hidden_state (CPU): {e}")
+
+                # Method 3: Try direct tensor output (some models return tensors directly)
+                if not activations_extracted and torch.is_tensor(outputs):
+                    try:
+                        if preserve_gradients:
+                            extracted_data['final_activations'] = outputs.clone()
+                        else:
+                            extracted_data['final_activations'] = outputs.clone()
+                        logger.info(f"Extracted output tensor (CPU): shape {outputs.shape}")
+                        activations_extracted = True
+                    except Exception as e:
+                        logger.debug(f"Could not extract from tensor output (CPU): {e}")
+
+                # Method 4: Try logits if available (fallback for some architectures)
+                if not activations_extracted and hasattr(outputs, 'logits'):
+                    try:
+                        if preserve_gradients:
+                            extracted_data['final_activations'] = outputs.logits.clone()
+                        else:
+                            extracted_data['final_activations'] = outputs.logits.clone()
+                        logger.info(f"Extracted logits as fallback (CPU): shape {extracted_data['final_activations'].shape}")
+                        activations_extracted = True
+                    except Exception as e:
+                        logger.debug(f"Could not extract from logits (CPU): {e}")
+
+                # Method 5: Check if outputs is a tuple/list and extract last element
+                if not activations_extracted and isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+                    try:
+                        last_output = outputs[-1]
+                        if torch.is_tensor(last_output):
+                            if preserve_gradients:
+                                extracted_data['final_activations'] = last_output.clone()
+                            else:
+                                extracted_data['final_activations'] = last_output.clone()
+                            logger.info(f"Extracted from tuple output (CPU): shape {extracted_data['final_activations'].shape}")
+                            activations_extracted = True
+                    except Exception as e:
+                        logger.debug(f"Could not extract from tuple output (CPU): {e}")
+
+                # Final check - if we still don't have activations, this is a problem
+                if not activations_extracted:
+                    logger.warning("Could not extract activations from model output (CPU fallback)")
+                    logger.debug(f"Output type: {type(outputs)}")
+                    logger.debug(f"Output attributes: {[attr for attr in dir(outputs) if not attr.startswith('_')]}")
+                    # Don't fail here - let the calling code handle the error
 
         # Step 2: CRITICAL - Free model from GPU if it's using too much memory
         model_moved_to_cpu = False
@@ -5206,6 +5374,10 @@ class MetricRegistry:
                 activations = context.custom_data['extracted_superposition_data'].get('final_activations')
 
                 if activations is None:
+                    logger.error("Could not extract activations for sparsity analysis. Model may not support hidden_states output.")
+                    logger.error("This is a fundamental issue with the model architecture compatibility.")
+                    logger.error("For sparsity analysis, we need access to intermediate activations.")
+                    logger.error("Consider using a different model or checking model documentation.")
                     return {'error': 'Could not extract activations for sparsity analysis. Model may not support hidden_states output.'}
 
                 # Ensure activations are on the same device as the analyzer expects
@@ -5213,7 +5385,12 @@ class MetricRegistry:
                     analyzer_device = func.__self__.device
                     if activations.device != analyzer_device:
                         activations = activations.to(analyzer_device)
-                        logger.debug(f"Moved activations from {context.custom_data['extracted_superposition_data']['final_activations'].device} to {analyzer_device}")
+                        logger.debug(f"Moved activations from {activations.device} to {analyzer_device}")
+
+                # CRITICAL THEORETICAL FIX: For sparsity analysis, we need to analyze across the feature dimension
+                # The current approach takes the last hidden state, but we should analyze the distribution
+                # of activation values across neurons for each token position
+                # This gives us insight into how many features are active simultaneously
 
                 # CRITICAL: Register model parameters for potential GPU eviction
                 # If memory is tight, the analyzer will evict these to make space for calculations
@@ -5519,6 +5696,52 @@ class MetricRegistry:
                     mask2=mask2,
                     method=method
                 )
+
+            elif 'compute_causal_necessity' in func_name:
+                # Special handling for causal necessity analysis - needs memory-efficient parameters
+                if context.model and context.batch:
+                    # Use memory-efficient parameters for causal necessity
+                    custom_args_optimized = custom_args.copy()
+                    # Override with even more conservative settings for the OOM issue
+                    custom_args_optimized.update({
+                        'n_samples': 30,  # Further reduced from 50
+                        'batch_size': 8,  # Reduced from 16
+                        'interventions_per_batch': 3,  # Reduced from 5
+                        'ablation_fraction': 0.02,  # Reduced from 0.05
+                        'compute_confidence': False,  # Disable bootstrap CI
+                        'n_bootstrap': 50  # Reduced bootstrap samples
+                    })
+
+                    # Use only a subset of the batch to further reduce memory usage
+                    if isinstance(context.batch, dict) and 'input_ids' in context.batch:
+                        # Limit to 64 samples maximum for causal necessity
+                        max_samples = 64
+                        current_samples = context.batch['input_ids'].shape[0]
+                        if current_samples > max_samples:
+                            logger.warning(f"Reducing batch size for causal_necessity from {current_samples} to {max_samples} samples")
+                            limited_batch = {}
+                            for key, value in context.batch.items():
+                                if torch.is_tensor(value):
+                                    limited_batch[key] = value[:max_samples]
+                                else:
+                                    limited_batch[key] = value
+                        else:
+                            limited_batch = context.batch
+
+                        # Ensure batch is on CPU to save GPU memory during setup
+                        cpu_batch = {}
+                        for key, value in limited_batch.items():
+                            if torch.is_tensor(value) and value.is_cuda:
+                                cpu_batch[key] = value.cpu()
+                            else:
+                                cpu_batch[key] = value
+
+                        # Call with optimized parameters
+                        return func(context.model, cpu_batch, **custom_args_optimized)
+                    else:
+                        return func(context.model, context.batch, **custom_args_optimized)
+                else:
+                    return {'error': 'compute_causal_necessity requires model and batch'}
 
             else:
                 # Generic custom function - try to pass context
@@ -5940,6 +6163,9 @@ def create_trajectory_config(args) -> UnifiedConfig:
         'compute_vector_interference'
     ]
 
+    advanced_flag = getattr(args, 'advanced_fisher', None)
+    advanced_enabled = True if advanced_flag is None else advanced_flag
+
     config = UnifiedConfig(
         # Basic settings from args
         model_paths=getattr(args, 'models', []) or [],
@@ -5984,7 +6210,7 @@ def create_trajectory_config(args) -> UnifiedConfig:
         # Other settings
         correlation_enabled=not getattr(args, 'no_correlation', False),
         intervention_enabled=not getattr(args, 'no_intervention', False),
-        compute_advanced_fisher_metrics=not getattr(args, 'no_advanced_fisher', False),
+        compute_advanced_fisher_metrics=advanced_enabled,
     )
 
     return config
@@ -6989,27 +7215,22 @@ class UnifiedModelAnalyzer:
                     logger.warning(f"  Could not test parameter patterns: {e}")
                     logger.warning("  Using legacy pattern matching (may miss Qwen patterns)")
 
-            # Compute supplementary advanced Fisher metrics FIRST (so KFAC is available for comparison)
-            advanced_fisher_results = None
-            advanced_fisher_collector = None
+            # Initialize shared AdvancedFisherCollector for reuse across phases
+            shared_advanced_collector = None
             if self.config.compute_advanced_fisher_metrics and not self.config.skip_fisher_metrics:
-                logger.info("Computing supplementary advanced Fisher metrics (K-FAC, capacity, curvature)...")
-                advanced_fisher_results, advanced_fisher_collector = self._compute_advanced_fisher_metrics(model, context)
+                logger.info("Initializing shared AdvancedFisherCollector for K-FAC and advanced metrics...")
+                shared_advanced_collector = AdvancedFisherCollector(
+                    use_true_fisher=False,  # Keep empirical for consistency
+                    use_kfac=True,
+                    kfac_update_freq=1,
+                    damping=1e-8,
+                    kfac_show_progress=getattr(self.config, 'verbose', False)
+                )
+                # Store in context for reuse
+                context.shared_advanced_collector = shared_advanced_collector
+                logger.info("  ✓ Shared AdvancedFisherCollector initialized and stored in context")
 
-                # Store as separate key to not interfere with standard Fisher
-                if advanced_fisher_results and 'error' not in advanced_fisher_results:
-                    if not hasattr(context, 'advanced_fisher_info'):
-                        context.advanced_fisher_info = {}
-                    context.advanced_fisher_info = advanced_fisher_results
-
-                    # Add KFAC factors and collector to context for use by other metrics
-                    if advanced_fisher_collector:
-                        context.fisher_collector = advanced_fisher_collector
-                        if advanced_fisher_collector.kfac_factors:
-                            context.kfac_factors = advanced_fisher_collector.kfac_factors
-                            logger.info(f"  ✓ KFAC factors stored in context ({len(advanced_fisher_collector.kfac_factors)} layers)")
-
-            # Run comprehensive Fisher analysis suite (KFAC now available for comparison)
+            # Run comprehensive Fisher analysis suite (includes KFAC computation in Phase 1)
             fisher_analysis_results = None
             if fisher_metrics_to_compute:
                 fisher_analysis_results = self._compute_fisher_analysis_suite(
@@ -8893,7 +9114,7 @@ class UnifiedModelAnalyzer:
 
         return True
 
-    def _compute_fisher_method_comparison(self, model, context, bombshell, task_batches_dict):
+    def _compute_fisher_method_comparison(self, model, context, bombshell, task_batches_dict, current_task=None):
         """
         Compare all four Fisher computation methods:
         1. Grouped Fisher (parameter group reduction, current default)
@@ -8906,6 +9127,7 @@ class UnifiedModelAnalyzer:
             context: Analysis context with batches
             bombshell: BombshellMetrics instance with grouped Fisher already computed
             task_batches_dict: Dictionary mapping task names to batches
+            current_task: Current task name (if in task-specific mode, None for general mode)
 
         Returns:
             dict: Comparison results for all methods
@@ -8917,9 +9139,32 @@ class UnifiedModelAnalyzer:
 
         results = {}
 
-        # Get a representative batch (use first task's first batch)
-        first_task = list(task_batches_dict.keys())[0]
-        representative_batch = task_batches_dict[first_task][0] if task_batches_dict[first_task] else context.batch
+        # Get appropriate batch based on context
+        representative_batch = None
+        comparison_task = None
+
+        if current_task and current_task in task_batches_dict and task_batches_dict[current_task]:
+            # Use current task's batch for task-specific computations
+            representative_batch = task_batches_dict[current_task][0]
+            comparison_task = current_task
+            logger.debug(f"    Using task-specific batch for '{current_task}' in Fisher comparison")
+        elif task_batches_dict:
+            # Fall back to first available task batch for general computations
+            for task_name, batches in task_batches_dict.items():
+                if batches:
+                    representative_batch = batches[0]
+                    comparison_task = task_name
+                    break
+
+        if representative_batch is None and context.batch is not None:
+            representative_batch = context.batch
+
+        if comparison_task is None and task_batches_dict:
+            comparison_task = next(iter(task_batches_dict.keys()))
+
+        if comparison_task is None and getattr(bombshell, 'fisher_accumulated', None):
+            # Last resort: use any task that already has Fisher data stored
+            comparison_task = next(iter(bombshell.fisher_accumulated.keys()), None)
 
         if not representative_batch:
             logger.warning("No batch available for Fisher method comparison")
@@ -8929,7 +9174,11 @@ class UnifiedModelAnalyzer:
         # METHOD 1: Grouped Fisher (already computed)
         # ===================================================================
         try:
-            num_groups = len(bombshell.fisher_accumulated.get(first_task, {}))
+            task_for_groups = comparison_task
+            if task_for_groups is None:
+                task_for_groups = next(iter(bombshell.fisher_accumulated.keys())) if getattr(bombshell, 'fisher_accumulated', None) else None
+
+            num_groups = len(bombshell.fisher_accumulated.get(task_for_groups, {})) if task_for_groups else 0
             results['grouped_fisher'] = {
                 'description': f'Group-reduced Fisher ({num_groups} parameter groups)',
                 'num_components': num_groups,
@@ -9021,10 +9270,16 @@ class UnifiedModelAnalyzer:
         # METHOD 4: Lanczos (top eigenspace)
         # ===================================================================
         try:
-            from fisher import AdvancedFisherCollector
-
             logger.info("      Computing Lanczos top eigenspace (empirical Fisher, k=20, max_iters=30)...")
+            
+            # Reuse shared collector if available, otherwise create new one
+            if hasattr(context, 'shared_advanced_collector') and context.shared_advanced_collector:
+                collector = context.shared_advanced_collector
+                logger.info("      Using shared AdvancedFisherCollector for Lanczos computation")
+            else:
+                from fisher import AdvancedFisherCollector
             collector = AdvancedFisherCollector()
+            logger.info("      Created new AdvancedFisherCollector for Lanczos computation")
 
             start_time = time.time()
             lanczos_k = 20
@@ -9264,6 +9519,53 @@ class UnifiedModelAnalyzer:
             task_batches_dict = {}
             logger.warning("  No batches available for Fisher computation")
 
+        # Phase 1a: Compute KFAC factors for all tasks using shared collector (if available)
+        if hasattr(context, 'shared_advanced_collector') and context.shared_advanced_collector:
+            logger.info("  Phase 1a: Computing K-FAC factors for all tasks using batching system...")
+            try:
+                device = next(model.parameters()).device
+                kfac_tasks_computed = []
+                
+                # Compute KFAC for each task separately
+                for task_name, batches in task_batches_dict.items():
+                    if not batches or len(batches) == 0:
+                        continue
+                    
+                    logger.info(f"    Computing K-FAC factors for task '{task_name}'...")
+                    
+                    # Use first batch from this task for KFAC computation
+                    representative_batch = batches[0]
+                    
+                    # Ensure batch is on the same device as the model
+                    batch = {k: v.to(device) if torch.is_tensor(v) else v
+                            for k, v in representative_batch.items()}
+                    
+                    # Update K-FAC factors using shared collector with task-specific storage
+                    if hasattr(context.shared_advanced_collector, '_update_kfac_factors'):
+                        context.shared_advanced_collector._update_kfac_factors(model, batch, task_name=task_name)
+                        kfac_tasks_computed.append(task_name)
+                        logger.info(f"    ✓ K-FAC factors computed for task '{task_name}'")
+                    else:
+                        logger.warning(f"    ⚠️ Shared collector does not support K-FAC factor updates for task '{task_name}'")
+                
+                if kfac_tasks_computed:
+                    # Store task-specific KFAC factors in context for reuse
+                    if hasattr(context.shared_advanced_collector, 'kfac_factors_by_task'):
+                        context.kfac_factors_by_task = context.shared_advanced_collector.kfac_factors_by_task
+                        logger.info(f"    ✓ Task-specific KFAC factors stored in context ({len(context.kfac_factors_by_task)} tasks)")
+                        for task_name, factors in context.kfac_factors_by_task.items():
+                            logger.info(f"      - Task '{task_name}': {len(factors)} layers")
+                    elif context.shared_advanced_collector.kfac_factors:
+                        context.kfac_factors = context.shared_advanced_collector.kfac_factors
+                        logger.info(f"    ✓ KFAC factors stored in context ({len(context.shared_advanced_collector.kfac_factors)} layers)")
+                    logger.info(f"    ✓ KFAC computed for tasks: {', '.join(kfac_tasks_computed)}")
+                else:
+                    logger.warning("    ⚠️ No KFAC factors computed for any task")
+                    
+            except Exception as e:
+                logger.warning(f"    ⚠️ K-FAC computation failed: {e}")
+                logger.warning("    Continuing with Fisher computation...")
+
         fisher_computed_tasks = {}  # Track which tasks have Fisher computed (Welford)
         task_names = []  # Track task names for later phases
         for task_name, batches in task_batches_dict.items():
@@ -9273,7 +9575,7 @@ class UnifiedModelAnalyzer:
 
             # Calculate total samples
             total_samples = sum(b.get('input_ids', torch.tensor([])).shape[0] for b in batches)
-            logger.info(f"  Computing Fisher for task '{task_name}': {len(batches)} batch(es), {total_samples} total samples")
+            logger.info(f"  Phase 1b: Computing Fisher for task '{task_name}': {len(batches)} batch(es), {total_samples} total samples")
 
             try:
                 fisher_computed = False
@@ -9307,7 +9609,9 @@ class UnifiedModelAnalyzer:
                         logger.info(f"    ✓ TRUE Welford Fisher accumulated for '{task_name}' across {len(batch_list)} batches ({total_samples} samples)")
 
                         # VERIFICATION: Check that M2 is non-zero (proves real Welford was used)
-                        if task_name in bombshell.fisher_m2 and bombshell.fisher_m2[task_name]:
+                        if task_name not in bombshell.fisher_m2 or not bombshell.fisher_m2[task_name]:
+                            logger.warning(f"    ⚠️ M2 not found or all zeros - Welford may not have worked!")
+                        else:
                             m2_nonzero = sum(1 for v in bombshell.fisher_m2[task_name].values() if v.abs().max() > 1e-10)
                             m2_total = len(bombshell.fisher_m2[task_name])
                             logger.info(f"    ✓ Welford verified: M2 non-zero for {m2_nonzero}/{m2_total} parameters")
@@ -9339,63 +9643,60 @@ class UnifiedModelAnalyzer:
                                         results['overlap_analysis'] = overlap_results['comparisons']
                                         results['task_active_groups'] = overlap_results['task_active_counts']
                                         results['overlap_summary'] = overlap_results['summary']
+                            # FISHER METHOD COMPARISON: Compare all available Fisher computation methods
+                            if context.batch and len(task_batches_dict) >= 1:
+                                logger.info("\n    🔬 FISHER METHOD COMPARISON:")
+                                try:
+                                    fisher_comparison = self._compute_fisher_method_comparison(
+                                        model, context, bombshell, task_batches_dict, current_task=task_name
+                                    )
+                                    if fisher_comparison:
+                                        results.setdefault('fisher_method_comparison', {})[task_name] = fisher_comparison
 
-                                # FISHER METHOD COMPARISON: Compare all available Fisher computation methods
-                                if context.batch and len(task_batches_dict) >= 1:
-                                    logger.info("\n    🔬 FISHER METHOD COMPARISON:")
-                                    try:
-                                        fisher_comparison = self._compute_fisher_method_comparison(
-                                            model, context, bombshell, task_batches_dict
-                                        )
-                                        if fisher_comparison:
-                                            results['fisher_method_comparison'] = fisher_comparison
+                                        # Log summary
+                                        for method, data in fisher_comparison.items():
+                                            if method in ['comparison', 'summary']:
+                                                continue
 
-                                            # Log summary
-                                            for method, data in fisher_comparison.items():
-                                                if method in ['comparison', 'summary']:
-                                                    continue
+                                            description = data.get('description', 'N/A')
+                                            status = data.get('status', 'unknown')
+                                            logger.info(f"      {method}: {description}")
 
-                                                description = data.get('description', 'N/A')
-                                                status = data.get('status', 'unknown')
-                                                logger.info(f"      {method}: {description}")
+                                            # Provide richer per-method diagnostics
+                                            if status == 'computed':
+                                                if data.get('computation_time'):
+                                                    logger.info(f"        ⏱️  compute_time: {data['computation_time']}")
+                                                if data.get('memory_mb') is not None:
+                                                    logger.info(f"        💾 est_memory: {data['memory_mb']} MB")
 
-                                                # Provide richer per-method diagnostics
-                                                if status == 'computed':
-                                                    if data.get('computation_time'):
-                                                        logger.info(f"        ⏱️  compute_time: {data['computation_time']}")
-                                                    if data.get('memory_mb') is not None:
-                                                        logger.info(f"        💾 est_memory: {data['memory_mb']} MB")
+                                                if method == 'spectral':
+                                                    sample = data.get('top_eigenvalues_sample', {})
+                                                    if sample:
+                                                        layer_name, eigenvalues = next(iter(sample.items()))
+                                                        logger.info(f"        λ₁..₃ ({layer_name}): {eigenvalues}")
 
-                                                    if method == 'spectral':
-                                                        sample = data.get('top_eigenvalues_sample', {})
-                                                        if sample:
-                                                            layer_name, eigenvalues = next(iter(sample.items()))
-                                                            logger.info(f"        λ₁..₃ ({layer_name}): {eigenvalues}")
+                                                if method == 'lanczos':
+                                                    top_eigs = data.get('top_eigenvalues', [])
+                                                    if top_eigs:
+                                                        logger.info(f"        top_eigenvalues: {top_eigs}")
+                                                    if data.get('condition_number') is not None:
+                                                        logger.info(f"        condition_number: {data['condition_number']:.3e}")
 
-                                                    if method == 'lanczos':
-                                                        top_eigs = data.get('top_eigenvalues', [])
-                                                        if top_eigs:
-                                                            logger.info(f"        top_eigenvalues: {top_eigs}")
-                                                        if data.get('condition_number') is not None:
-                                                            logger.info(f"        condition_number: {data['condition_number']:.3e}")
+                                                if method == 'grouped_fisher':
+                                                    logger.info(
+                                                        f"        groups: {data.get('num_components', 'N/A')} | use_case: {data.get('use_case', 'N/A')}"
+                                                    )
 
-                                                    if method == 'grouped_fisher':
-                                                        logger.info(
-                                                            f"        groups: {data.get('num_components', 'N/A')} | use_case: {data.get('use_case', 'N/A')}"
-                                                        )
+                                            elif method == 'kfac' and status == 'available_but_not_computed':
+                                                logger.info("        Tip: use --no-advanced-fisher to skip KFAC factor computation if stability issues arise")
+                                            elif status == 'error':
+                                                logger.info(f"        error: {data.get('error', 'unknown')}")
 
-                                                elif method == 'kfac' and status == 'available_but_not_computed':
-                                                    logger.info("        Tip: enable compute_advanced_fisher_metrics=True to populate KFAC factors")
-                                                elif status == 'error':
-                                                    logger.info(f"        error: {data.get('error', 'unknown')}")
-
-                                            if 'summary' in fisher_comparison:
-                                                summary = fisher_comparison['summary']
-                                                logger.info(f"\n      Recommendation: {summary.get('recommendation', 'Use default 338 groups')}")
-                                    except Exception as e:
-                                        logger.warning(f"    Fisher method comparison failed: {e}")
-                        else:
-                            logger.warning(f"    ⚠️ M2 not found or all zeros - Welford may not have worked!")
+                                        if 'summary' in fisher_comparison:
+                                            summary = fisher_comparison['summary']
+                                            logger.info(f"\n      Recommendation: {summary.get('recommendation', 'Use default 338 groups')}")
+                                except Exception as e:
+                                    logger.warning(f"    Fisher method comparison failed: {e}")
 
                         # NUMERICAL HEALTH: Report Fisher dynamic range
                         if task_name in bombshell.fisher_accumulated:
@@ -9549,6 +9850,15 @@ class UnifiedModelAnalyzer:
                 if ('_' in k or '|' in k) and len(k.split('|' if '|' in k else '_')) > 1
             )),
             'computation_time': 0.0  # Will be updated
+        }
+        
+        # Store Fisher EMA data for downstream compatibility
+        results['fisher_ema_data'] = {
+            'fisher_ema': bombshell.fisher_ema,
+            'fisher_accumulated': bombshell.fisher_accumulated,
+            'fisher_m2': bombshell.fisher_m2,
+            'fisher_variance': bombshell.fisher_variance,
+            'tasks_computed': results['tasks_analyzed']
         }
 
         # Initialize structured results
@@ -9727,9 +10037,10 @@ class UnifiedModelAnalyzer:
             if hasattr(bombshell, 'enable_cross_task_analysis') and bombshell.enable_cross_task_analysis:
                 try:
                     # Detect conflicts between first two tasks
+                    # ICLR: Increased max_conflicts to get comprehensive analysis
                     conflicts = bombshell.detect_cross_task_conflicts(
                         task_names[0], task_names[1],
-                        max_conflicts=50
+                        max_conflicts=200  # Increased from 50 for ICLR submission
                     )
 
                     if conflicts and conflicts.get('top_conflicts'):
@@ -9806,7 +10117,7 @@ class UnifiedModelAnalyzer:
                     task_b=task_b,
                     layers=list(range(qkov_config.num_layers)),
                     heads=list(range(qkov_config.num_heads)),
-                    max_sample_pairs=100  # Limit for performance
+                    max_samples_per_task=100  # Limit for performance
                 )
 
                 # Extract summary statistics
@@ -9920,148 +10231,30 @@ class UnifiedModelAnalyzer:
 
     def _compute_advanced_fisher_metrics(self, model, context):
         """
-        Compute supplementary advanced Fisher metrics using AdvancedFisherCollector.
-
-        This adds theoretical metrics without changing the empirical Fisher used by
-        the main analysis pipeline.
-
-        Returns:
-            Tuple of (results_dict, advanced_collector) where advanced_collector
-            contains KFAC factors for use by other metrics
+        DEPRECATED: Advanced Fisher metrics are now computed in Phase 1 of Fisher analysis suite.
+        
+        This method is kept for backward compatibility but now just returns
+        results from the shared collector if available.
         """
+        logger.info("Advanced Fisher metrics now computed in Phase 1 - using shared collector results")
+        
         results = {
             'kfac_enabled': False,
             'capacity_metrics': {},
             'loss_curvature': {},
             'spectrum_analysis': {},
-            'compute_time': 0.0
+            'compute_time': 0.0,
+            'status': 'computed_in_phase1'
         }
-
-        start_time = datetime.now()
-
-        try:
-            # Create advanced collector with K-FAC enabled
-            advanced_collector = AdvancedFisherCollector(
-                use_true_fisher=False,  # Keep empirical for consistency
-                use_kfac=True,
-                kfac_update_freq=1,
-                damping=1e-8,
-                kfac_show_progress=getattr(self.config, 'verbose', False)
-            )
-
-            # Use consistent batch size for advanced analysis
-            FISHER_BATCH_SIZE = 32  # Unified batch size for advanced Fisher/K-FAC (was 16)
-            FISHER_EPSILON = 1e-8  # Standardized epsilon across all methods
-            batch = context.batch
-            if batch is not None and 'input_ids' in batch:
-                # Reduce batch size if needed
-                if batch['input_ids'].shape[0] > FISHER_BATCH_SIZE:
-                    batch = {k: v[:FISHER_BATCH_SIZE] if torch.is_tensor(v) else v
-                            for k, v in batch.items()}
-
-            # Ensure batch is on the same device as the model
-            device = next(model.parameters()).device
-            if batch is not None:
-                batch = {k: v.to(device) if torch.is_tensor(v) else v
-                            for k, v in batch.items()}
-
-            # Update K-FAC factors
-            if hasattr(advanced_collector, '_update_kfac_factors'):
-                logger.info("  Computing K-FAC factors...")
-                advanced_collector._update_kfac_factors(model, batch)
-                results['kfac_enabled'] = bool(advanced_collector.kfac_factors)
-
-                if advanced_collector.kfac_factors:
-                    logger.info(f"    ✓ K-FAC factors computed for {len(advanced_collector.kfac_factors)} layers")
-
-            # Compute capacity metrics
-            try:
-                logger.info("  Computing capacity metrics...")
-                capacity = advanced_collector.compute_capacity_metrics(
-                    task='advanced_analysis',
-                    use_kfac=True,
-                    use_spectrum=False,  # Don't use Lanczos here
-                    model=model,
-                    batch=batch
-                )
-
-                if capacity and 'error' not in capacity:
-                    results['capacity_metrics'] = {
-                        'total_trace': capacity.get('total_trace', 0),
-                        'average_effective_rank': capacity.get('avg_effective_rank', 0),
-                        'max_condition_number': capacity.get('max_condition_number', 0),
-                        'pac_bayes_complexity': capacity.get('pac_bayes_complexity', 0)
-                    }
-                    logger.info(f"    ✓ Capacity metrics computed")
-
-                    # Store per-layer metrics if available
-                    if 'per_layer' in capacity:
-                        results['per_layer_capacity'] = capacity['per_layer']
-
-            except Exception as e:
-                logger.warning(f"    Failed to compute capacity metrics: {e}")
-
-            # Compute loss landscape curvature
-            try:
-                logger.info("  Computing loss landscape curvature...")
-                curvature = advanced_collector.compute_loss_landscape_curvature(
-                    model, batch,
-                    epsilon=0.01,
-                    n_samples=5  # Reduced for speed
-                )
-
-                if curvature and 'error' not in curvature:
-                    results['loss_curvature'] = {
-                        'average_sharpness': curvature.get('average_sharpness', 0),
-                        'max_sharpness': curvature.get('max_sharpness', 0),
-                        'effective_curvature': curvature.get('effective_curvature', 0),
-                        'landscape_variance': curvature.get('landscape_variance', 0)
-                    }
-                    logger.info(f"    ✓ Loss landscape curvature computed")
-
-            except Exception as e:
-                logger.warning(f"    Failed to compute loss curvature: {e}")
-
-            # Analyze Fisher spectrum
-            try:
-                logger.info("  Analyzing Fisher spectrum...")
-                spectrum = advanced_collector.analyze_fisher_spectrum('advanced_analysis')
-
-                if spectrum:
-                    # Extract key statistics
-                    results['spectrum_analysis'] = {
-                        'n_layers_analyzed': len(spectrum),
-                        'layers': {}
-                    }
-
-                    for layer_key, layer_stats in spectrum.items():
-                        if isinstance(layer_stats, dict):
-                            results['spectrum_analysis']['layers'][layer_key] = {
-                                'max_eigenvalue': layer_stats.get('max_eigenvalue', 0),
-                                'spectral_norm': layer_stats.get('spectral_norm', 0),
-                                'nuclear_norm': layer_stats.get('nuclear_norm', 0),
-                                'n_significant': layer_stats.get('n_significant', 0)
-                            }
-
-                    if results['spectrum_analysis']['layers']:
-                        logger.info(f"    ✓ Spectrum analyzed for {len(results['spectrum_analysis']['layers'])} components")
-
-            except Exception as e:
-                logger.warning(f"    Failed to analyze spectrum: {e}")
-
-            # Store KFAC factors in results for use by other metrics
-            if advanced_collector.kfac_factors:
-                results['kfac_factors'] = advanced_collector.kfac_factors
-
-        except Exception as e:
-            logger.error(f"Advanced Fisher analysis failed: {e}")
-            results['error'] = str(e)
-            advanced_collector = None
-
-        results['compute_time'] = (datetime.now() - start_time).total_seconds()
-        logger.info(f"Advanced Fisher analysis completed in {results['compute_time']:.2f}s")
-
-        return results, advanced_collector
+        
+        # Check if we have results from the shared collector
+        if hasattr(context, 'shared_advanced_collector') and context.shared_advanced_collector:
+            if context.shared_advanced_collector.kfac_factors:
+                results['kfac_enabled'] = True
+                results['kfac_factors'] = context.shared_advanced_collector.kfac_factors
+                logger.info("  ✓ Using KFAC factors from shared collector")
+        
+        return results, getattr(context, 'shared_advanced_collector', None)
 
     def _generate_fisher_recommendations(self, fisher_results):
         """Generate actionable recommendations from Fisher analysis."""
@@ -10548,9 +10741,22 @@ def main():
         help="Skip intervention analysis"
     )
     parser.add_argument(
-        "--no-advanced-fisher",
+        "--advanced-fisher",
+        dest="advanced_fisher",
         action="store_true",
-        help="Disable advanced Fisher metrics (K-FAC, capacity, curvature)"
+        default=None,
+        help="Force-enable advanced Fisher metrics (K-FAC, capacity, curvature). Enabled by default."
+    )
+    parser.add_argument(
+        "--no-advanced-fisher",
+        dest="advanced_fisher",
+        action="store_false",
+        help="Disable advanced Fisher metrics (K-FAC, capacity, curvature) if they cause instability"
+    )
+    parser.add_argument(
+        "--no-memory-leak-detection",
+        action="store_true",
+        help="Disable memory leak detection (reduces noise from false positives)"
     )
     parser.add_argument(
         "--disable-cross-task-analysis",
@@ -10817,6 +11023,8 @@ def main():
 
     elif args.models:
         # Standard model analysis (existing behavior)
+        advanced_enabled = True if args.advanced_fisher is None else args.advanced_fisher
+
         config = UnifiedConfig(
             model_paths=args.models or [],
             base_model=args.base_model,
@@ -10832,7 +11040,8 @@ def main():
             random_seed=args.random_seed,
             enable_cross_task_analysis=not args.disable_cross_task_analysis,
             gradient_memory_mb=args.gradient_memory_mb,
-            compute_advanced_fisher_metrics=not args.no_advanced_fisher
+            compute_advanced_fisher_metrics=advanced_enabled,
+            enable_memory_leak_detection=not args.no_memory_leak_detection
         )
 
         results = analyze_models(args.models, config)

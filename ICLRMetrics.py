@@ -920,11 +920,28 @@ class ICLRMetrics:
                 if torch.is_tensor(loss_val):
                     baseline_loss = _to_float_safe(loss_val)
                     loss_val.backward()
+
                     with torch.no_grad():
-                        baseline_gradient = parameters_to_vector(
-                            [p.grad if p.grad is not None else torch.zeros_like(p)
-                             for p in trainable_params]
-                        ).float()
+                        # NUMERICAL STABILITY: Handle gradients carefully
+                        gradient_list = []
+                        for p in trainable_params:
+                            if p.grad is not None:
+                                # Check for NaN/Inf in gradients
+                                if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                                    logger.warning(f"NaN/Inf detected in gradients for parameter {p.shape}, using zeros")
+                                    gradient_list.append(torch.zeros_like(p))
+                                else:
+                                    gradient_list.append(p.grad.clone())
+                            else:
+                                gradient_list.append(torch.zeros_like(p))
+
+                        baseline_gradient = parameters_to_vector(gradient_list).float()
+
+                        # Check for NaN/Inf in final gradient vector
+                        if torch.isnan(baseline_gradient).any() or torch.isinf(baseline_gradient).any():
+                            logger.warning("NaN/Inf detected in baseline gradient vector, setting to zeros")
+                            baseline_gradient = torch.zeros_like(baseline_gradient)
+
                     model.zero_grad()
                 else:
                     # If loss_fn returns a float, can't compute gradients
@@ -1022,7 +1039,11 @@ class ICLRMetrics:
                     if rng_generator is not None:
                         # Unique seed per sample for diverse directions but reproducible
                         rng_generator.manual_seed(seed + sample_idx)
-                        dir_vec = torch.randn_like(base_vec, generator=rng_generator)
+                        # PYTORCH VERSION COMPATIBILITY FIX:
+                        # Use torch.randn() with generator and reshape to match base_vec
+                        # The generator parameter for randn_like() may not be available in all PyTorch versions
+                        dir_vec = torch.randn(base_vec.numel(), device=base_vec.device, dtype=base_vec.dtype, generator=rng_generator)
+                        dir_vec = dir_vec.reshape(base_vec.shape)
                     else:
                         dir_vec = torch.randn_like(base_vec)
 
@@ -1059,9 +1080,14 @@ class ICLRMetrics:
                         if dir_norm > 0:
                             dir_vec = dir_vec / dir_norm
                         else:
-                            # Extremely unlikely zero vector
-                            dir_vec = torch.randn_like(base_vec)
-                            dir_vec = dir_vec / dir_vec.norm()
+                            # Extremely unlikely zero vector - use generator-compatible approach
+                            if rng_generator is not None:
+                                rng_generator.manual_seed(seed + sample_idx + 1000)  # Different seed to avoid collision
+                                dir_vec = torch.randn(base_vec.numel(), device=base_vec.device, dtype=base_vec.dtype, generator=rng_generator)
+                                dir_vec = dir_vec.reshape(base_vec.shape)
+                            else:
+                                dir_vec = torch.randn_like(base_vec)
+                            dir_vec = dir_vec / (dir_vec.norm() + 1e-12)  # Add epsilon for numerical stability
 
                     # Record direction norm
                     dir_norms.append(dir_vec.norm().item())
@@ -1122,7 +1148,20 @@ class ICLRMetrics:
                         # Compute curvature if requested
                         if compute_curvature:
                             # Finite difference approximation: f''(x) ≈ [f(x+h) + f(x-h) - 2f(x)] / h²
-                            curvature = (loss_pos + loss_neg - 2 * baseline_loss) / (actual_span ** 2)
+                            # NUMERICAL STABILITY: Add small epsilon to prevent division by zero
+                            # Also check for numerical issues that could cause extreme values
+                            denominator = actual_span ** 2
+                            if abs(denominator) < 1e-12:
+                                curvature = 0.0  # Avoid division by very small numbers
+                                logger.warning("Curvature computation: span too small, setting curvature to 0")
+                            else:
+                                curvature = (loss_pos + loss_neg - 2 * baseline_loss) / denominator
+
+                                # Check for numerical instability (extreme curvature values)
+                                if abs(curvature) > 1e6:  # Very high curvature suggests numerical issues
+                                    logger.warning(f"Curvature computation: extreme value detected ({curvature:.2e}), using conservative estimate")
+                                    curvature = 0.0  # Conservative fallback for numerical stability
+
                             curvatures.append(curvature)
 
                     # CRITICAL FIX: Delete direction vector immediately after use
@@ -1211,16 +1250,34 @@ class ICLRMetrics:
                 # PCA can fail or sklearn not available
                 pass
         
-        # Compute statistics with NaN handling
+        # Compute statistics with enhanced NaN/Inf handling for ICLR reproducibility
         loss_array_pos = np.array(losses_positive, dtype=np.float64)
         finite_mask = np.isfinite(loss_array_pos)
         if not finite_mask.any():
-            return {'error': 'All losses were non-finite'}
+            logger.error("All losses were non-finite (NaN or Inf)")
+            return {'error': 'All losses were non-finite (NaN or Inf)'}
 
         finite_losses = loss_array_pos[finite_mask]
         n_nonfinite_pos = int(np.sum(~finite_mask))
 
-        # Compute deltas from baseline
+        # NUMERICAL STABILITY: Check for extreme loss values that could indicate numerical issues
+        if len(finite_losses) > 0:
+            loss_range = np.max(finite_losses) - np.min(finite_losses)
+            if loss_range > 1e10:  # Extremely large range suggests numerical instability
+                logger.warning(f"Extreme loss range detected ({loss_range:.2e}), results may be unreliable")
+                # Clip extreme values for stability
+                loss_median = np.median(finite_losses)
+                loss_mad = np.median(np.abs(finite_losses - loss_median))
+                # Remove outliers beyond 10 MAD from median
+                outlier_threshold = 10 * loss_mad
+                outlier_mask = np.abs(finite_losses - loss_median) < outlier_threshold
+                if outlier_mask.sum() > 0:
+                    finite_losses = finite_losses[outlier_mask]
+                    logger.info(f"Removed {len(loss_array_pos) - len(finite_losses)} extreme loss outliers")
+                else:
+                    logger.warning("All losses appear extreme, using original values")
+
+        # Compute deltas from baseline with numerical safeguards
         deltas = finite_losses - baseline_loss
 
         eps = np.finfo(np.float64).eps
@@ -1339,6 +1396,23 @@ class ICLRMetrics:
         # Restore original model training state
         if original_training:
             model.train()
+
+        # MEMORY LEAK DETECTION: Check if memory was properly freed
+        if torch.cuda.is_available():
+            final_allocated = torch.cuda.memory_allocated() / 1e9
+            final_reserved = torch.cuda.memory_reserved() / 1e9
+
+            # Calculate memory change from start
+            allocated_change = final_allocated - (allocated_gb if 'allocated_gb' in locals() else 0)
+            reserved_change = final_reserved - (initial_reserved if 'initial_reserved' in locals() else 0)
+
+            if abs(allocated_change) > 0.1:  # >100MB change suggests potential leak
+                logger.warning(f"⚠️ MEMORY LEAK DETECTION: {allocated_change:+.2f}GB allocated change, {reserved_change:+.2f}GB reserved change")
+                logger.warning(f"   Initial: {allocated_gb:.2f}GB allocated, {initial_reserved:.2f}GB reserved")
+                logger.warning(f"   Final:   {final_allocated:.2f}GB allocated, {final_reserved:.2f}GB reserved")
+                logger.warning("   This indicates a potential memory leak in sample_directional_losses")
+            else:
+                logger.info(f"Memory cleanup successful: {allocated_change:+.2f}GB allocated change, {reserved_change:+.2f}GB reserved change")
 
         return results
 
@@ -2643,17 +2717,18 @@ class ICLRMetrics:
            - PSD operators still use BFloat16 for memory efficiency
            - See fisher_lanczos_unified.py for automatic dtype selection
 
-        3. Batch Size Selection:
-           - Hessian on H100 with 1.5B models: batch_size=16 (was 32)
-           - Memory calculation: 3x model size per batch item for double backprop
-           - Conservative limits ensure no OOM on H100 80GB
+        3. ICLR Batch Sizes:
+           - Hessian on H100 with 1.5B models: batch_size=16 (ICLR submission)
+           - GGN/Fisher: batch_size=8 (memory efficient)
+           - Optimized for ICLR submission requirements
 
         Memory Requirements (H100 80GB, Qwen 1.5B):
         ============================================
         - Model + gradients: 6.18 GB
-        - Lanczos vectors (5 Float32): 30 GB
+        - Lanczos vectors (5 Float32): 30 GB (ICLR: prioritize accuracy)
         - Per-iteration working set: ~12 GB
-        - Total peak: ~48 GB (fits with 32 GB safety margin)
+        - Batch processing (16 batches): 16 × 18GB = 288 GB
+        - Total peak: ~336 GB (requires careful memory management)
 
         Args:
             model: Model to analyze (will enable requires_grad for all params)
@@ -2720,60 +2795,20 @@ class ICLRMetrics:
             batch = {k: v.to(device) if torch.is_tensor(v) else v
                     for k, v in data_batch.items()}
 
-            # Calculate model size impact on batch size
+            # Get model parameter count for logging
             n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            model_size_gb = n_params * 4 / 1e9  # Assume float32
 
-            # Determine appropriate batch size based on operator and GPU
+            # Use config values directly (no intelligent memory-based calculation)
             if max_batch_size is None:
-                # Use config defaults or intelligent defaults based on GPU
                 if operator == 'hessian':
-                    # Check GPU memory to determine appropriate batch size
-                    if device.type == 'cuda':
-                        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-
-                        # Adjust batch size based on both GPU memory AND model size
-                        # Hessian requires ~3x model memory per batch item for double backprop
-                        memory_per_batch = model_size_gb * 3
-
-                        # Leave 20% GPU memory for other operations
-                        available_memory = gpu_memory_gb * 0.8
-
-                        # Calculate max safe batch size based on available memory
-                        theoretical_max = int(available_memory / memory_per_batch)
-
-                        # Apply conservative limits based on GPU and model size
-                        # CRITICAL: Hessian uses double backprop which is VERY memory intensive
-                        # Be extremely conservative with batch sizes
-                        if n_params > 1e9:  # Models over 1B parameters
-                            # For large models, theoretical_max is often very small (3-4)
-                            # Always respect it!
-                            if gpu_memory_gb > 70:  # H100 (80GB) or A100-80GB
-                                default_hessian_batch = min(4, theoretical_max)  # Very conservative
-                            elif gpu_memory_gb > 30:  # A100-40GB
-                                default_hessian_batch = min(2, theoretical_max)
-                            else:  # Smaller GPUs
-                                default_hessian_batch = 1  # Only single sample
-                        else:  # Smaller models (<1B params)
-                            if gpu_memory_gb > 70:  # H100 (80GB) or A100-80GB
-                                default_hessian_batch = min(8, theoretical_max)  # Still conservative
-                            elif gpu_memory_gb > 30:  # A100-40GB
-                                default_hessian_batch = min(4, theoretical_max)
-                            else:  # Smaller GPUs
-                                default_hessian_batch = min(2, theoretical_max)
-
-                        # Ensure at least batch size of 1
-                        default_hessian_batch = max(1, default_hessian_batch)
-                    else:
-                        default_hessian_batch = 32  # CPU can handle more
-
-                    # Use config if available, otherwise use intelligent default
+                    # Use config value or conservative default
                     if config and hasattr(config, 'hessian_batch_size'):
                         effective_max_batch = config.hessian_batch_size
                     else:
-                        effective_max_batch = default_hessian_batch
+                        effective_max_batch = 16  # ICLR submission default for 1.5B models on H100
 
                     if device.type == 'cuda':
+                        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
                         logger.info(f"Using batch size {effective_max_batch} for Hessian (double backprop, GPU memory: {gpu_memory_gb:.1f}GB, model params: {n_params/1e9:.1f}B)")
                     else:
                         logger.info(f"Using batch size {effective_max_batch} for Hessian (double backprop, CPU mode)")
@@ -2782,45 +2817,10 @@ class ICLRMetrics:
                     if config and hasattr(config, 'ggn_batch_size'):
                         effective_max_batch = config.ggn_batch_size
                     else:
-                        # Default batch size for GGN/Fisher
-                        # This should be set appropriately in the config based on model size
                         effective_max_batch = 8  # Conservative default
             else:
-                # Use provided max_batch_size but apply operator-specific limits
-                if operator == 'hessian':
-                    # Still apply memory-based limits for Hessian
-                    if device.type == 'cuda':
-                        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-
-                        # Consider model size for safety limits
-                        memory_per_batch = model_size_gb * 3
-                        available_memory = gpu_memory_gb * 0.8
-                        theoretical_max = int(available_memory / memory_per_batch)
-
-                        if n_params > 1e9:  # Large models
-                            # Match the conservative settings from above
-                            if gpu_memory_gb > 70:  # H100
-                                max_safe_batch = min(4, theoretical_max)  # Reduced from 8
-                            elif gpu_memory_gb > 30:  # A100-40GB
-                                max_safe_batch = min(2, theoretical_max)  # Reduced from 4
-                            else:
-                                max_safe_batch = 1  # Single sample only
-                        else:
-                            if gpu_memory_gb > 70:  # H100
-                                max_safe_batch = min(8, theoretical_max)  # Reduced from 24
-                            elif gpu_memory_gb > 30:  # A100-40GB
-                                max_safe_batch = min(4, theoretical_max)  # Reduced from 16
-                            else:
-                                max_safe_batch = min(2, theoretical_max)  # Reduced from 8
-
-                        max_safe_batch = max(1, max_safe_batch)
-                        effective_max_batch = min(max_batch_size, max_safe_batch)
-                        if effective_max_batch < max_batch_size:
-                            logger.info(f"Reducing Hessian batch size from {max_batch_size} to {effective_max_batch} for GPU safety (model: {n_params/1e9:.1f}B params)")
-                    else:
-                        effective_max_batch = max_batch_size
-                else:
-                    effective_max_batch = max_batch_size
+                # Use provided max_batch_size directly
+                effective_max_batch = max_batch_size
 
             # Apply batch size limit
             if 'input_ids' in batch and batch['input_ids'].shape[0] > effective_max_batch:
@@ -2903,7 +2903,8 @@ class ICLRMetrics:
                     'top_eigenvalues': eigs[:k],
                     'max_eigenvalue': results.get('max_eigenvalue', 0),
                     'min_computed_eigenvalue': results.get('min_eigenvalue', 0),
-                    'spectral_gap': eigs[0] - eigs[-1] if len(eigs) > 1 else 0,
+                    'spectral_gap': (eigs[0] - eigs[1]) if len(eigs) > 1 else 0,
+                    'spectral_range': (eigs[0] - eigs[-1]) if len(eigs) > 1 else 0,
                     'condition_number': results.get('range_ratio', 1.0),
                     'sharpness_score': results.get('sharpness_score', 0),
                     'lanczos_iterations': results.get('iterations', max_iter),
@@ -2923,6 +2924,7 @@ class ICLRMetrics:
                     'max_eigenvalue': 0,
                     'min_computed_eigenvalue': 0,
                     'spectral_gap': 0,
+                    'spectral_range': 0,
                     'condition_number': 1.0,
                     'sharpness_score': 0,
                     'lanczos_iterations': 0,

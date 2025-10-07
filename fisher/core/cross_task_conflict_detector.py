@@ -346,7 +346,7 @@ class CrossTaskConflictDetector:
         task_a: str,
         task_b: str,
         param_names: Optional[List[str]] = None,
-        max_comparisons: int = 50000
+        max_comparisons: int = 100000  # ICLR: Increased from 50k to 100k for comprehensive analysis
     ) -> List[CrossTaskConflict]:
         """
         Detect conflicts between samples from two tasks.

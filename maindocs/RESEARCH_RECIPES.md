@@ -70,10 +70,11 @@ overlap = analyzer.compute_fisher_overlap(task1_data, task2_data)
 
 **Curvature-aware pruning:**
 ```python
-# Use spectral gaps to find safe pruning thresholds
+# Use spectral gap (λ₁-λ₂) to find safe pruning thresholds
 spectrum = metrics.compute_fisher_spectrum(model, batch)
-spectral_gap = spectrum['eigenvalues'][1] - spectrum['eigenvalues'][0]
-# Large gap → safe to prune; small gap → be conservative
+spectral_gap = spectrum['eigenvalues'][0] - spectrum['eigenvalues'][1]
+spectral_range = spectrum['eigenvalues'][0] - spectrum['eigenvalues'][-1]
+# Large gap → safe to prune; large range but tiny gap → many near-top modes, stay conservative
 ```
 
 ### Mechanistic Interpretability
@@ -160,4 +161,3 @@ hybrid_imp = compute_hybrid_importance(model, batch)  # Combines multiple signal
 ```
 
 ---
-

@@ -23,10 +23,16 @@ import torch.nn as nn
 import math
 import logging
 import warnings
+import hashlib
 from typing import Dict, List, Tuple, Optional, Union, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_int_hash(s: str) -> int:
+    """Stable hash function for reproducibility across runs/processes."""
+    return int(hashlib.sha1(s.encode("utf-8")).hexdigest(), 16) % (10**9 + 7)
 
 
 @dataclass
@@ -37,11 +43,12 @@ class SpectralConfig:
     storage_mode: str = 'chunked'  # 'full', 'chunked', 'streaming'
     chunk_size: int = 32
     max_params_per_block: int = 10000
-    use_vmap: bool = False
     dtype_compute: torch.dtype = torch.float32
     dtype_eigensolve: torch.dtype = torch.float64  # Higher precision for eigensolve
+    eigensolve_device: str = 'auto'  # 'auto', 'cpu', 'cuda' - where to run eigensolve
     top_k_eigenvalues: int = 100  # Number of top eigenvalues to compute/store
-    regularization: float = 1e-8  # Diagonal regularization for Gram matrix
+    regularization: float = 1e-8  # Diagonal regularization (only applied on solver failure)
+    use_deterministic: bool = False  # Full determinism (slower but reproducible)
 
 
 class FisherSpectral:
@@ -54,6 +61,11 @@ class FisherSpectral:
     3. Uses Gram matrix trick when N << P for efficiency
     4. Ensures reproducibility with fixed seeds and deterministic algorithms
     5. Can reuse gradients from FisherCollector when available
+    
+    Performance Note:
+        Full determinism (use_deterministic=True) enforces torch.use_deterministic_algorithms(True),
+        which can significantly slow down eigensolves and other operations. Enable only for
+        camera-ready ICLR runs where exact reproducibility is required.
     """
 
     def __init__(self, config: Optional[SpectralConfig] = None, gradient_cache=None):
@@ -76,19 +88,22 @@ class FisherSpectral:
         # Set deterministic mode for ICLR reproducibility
         self._set_deterministic_mode()
 
-        # Check vmap availability
-        self.has_vmap = self.config.use_vmap and hasattr(torch.func, 'vmap')
-        if self.config.use_vmap and not self.has_vmap:
-            logger.warning("vmap requested but not available in PyTorch version. Using loop-based collection.")
-
     def _set_deterministic_mode(self):
-        """Set PyTorch to deterministic mode for reproducibility."""
+        """
+        Set PyTorch to deterministic mode for reproducibility.
+        
+        Note: Full determinism (use_deterministic=True) enforces deterministic CUDA kernels
+        but may slow down computation. Enable for camera-ready ICLR runs.
+        """
         torch.manual_seed(self.config.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.config.seed)
-            # Note: Full determinism may slow down computation
-            # torch.use_deterministic_algorithms(True)
-            # Uncomment above for full ICLR reproducibility
+        
+        if self.config.use_deterministic:
+            import os
+            torch.use_deterministic_algorithms(True)
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+            logger.info("Full deterministic mode enabled (may impact performance)")
 
     def compute_fisher_spectrum(
         self,
@@ -103,11 +118,12 @@ class FisherSpectral:
         Main entry point for Fisher spectrum computation.
 
         Args:
-            model: Neural network model
+            model: Neural network model (will be set to eval() mode)
             batch: Input batch with 'input_ids' and optional 'attention_mask'
             n_samples: Number of samples to use (None = use all in batch)
             block_structure: How to partition parameters into blocks
             center_gradients: If True, compute gradient covariance instead of Fisher
+            precomputed_gradients: Optional precomputed per-sample gradients
 
         Returns:
             Dictionary containing:
@@ -124,6 +140,10 @@ class FisherSpectral:
 
             For block-diagonal approximation:
             F ≈ diag(F₁, F₂, ...) where each Fₖ is the Fisher for block k
+        
+        Note on eval() mode:
+            We use eval() for deterministic forward passes. For models with BatchNorm,
+            ensure this matches your Fisher definition (train vs eval statistics).
         """
         # Ensure model is in eval mode for deterministic forward pass
         model.eval()
@@ -139,12 +159,16 @@ class FisherSpectral:
 
         # Collect gradients or use precomputed/cached ones
         if precomputed_gradients is not None:
+            # Guard empty list
+            if not precomputed_gradients:
+                logger.warning("Empty precomputed_gradients provided")
+                return self._empty_results()
             # Use precomputed gradients (from FisherCollector)
             gradients = self._organize_precomputed_gradients(
                 precomputed_gradients, block_structure
             )
-        elif self.gradient_cache is not None and self.gradient_cache.per_sample_gradients:
-            # Use cached gradients
+        elif getattr(self.gradient_cache, "per_sample_gradients", None):
+            # Use cached gradients (safe access with getattr)
             gradients = self._organize_precomputed_gradients(
                 self.gradient_cache.per_sample_gradients, block_structure
             )
@@ -153,7 +177,9 @@ class FisherSpectral:
         elif self.config.storage_mode == 'chunked':
             gradients = self._collect_gradients_chunked(model, batch, n_samples, block_structure)
         else:  # streaming
-            return self._compute_spectrum_streaming(model, batch, n_samples, block_structure)
+            return self._compute_spectrum_streaming(
+                model, batch, n_samples, block_structure, center_gradients
+            )
 
         # Compute spectrum from collected gradients
         return self._compute_spectrum_from_gradients(gradients, center_gradients, n_samples)
@@ -200,7 +226,35 @@ class FisherSpectral:
 
             try:
                 outputs = model(**single_batch)
-                loss = outputs.loss
+                
+                # Compute per-sample token-summed loss (not mean) for correct Fisher scale
+                if hasattr(outputs, "logits") and "labels" in single_batch:
+                    logits = outputs.logits
+                    labels = single_batch["labels"]
+                    
+                    if logits.dim() >= 3:
+                        # Language model: handle attention mask and sum over tokens
+                        mask = single_batch.get("attention_mask", torch.ones_like(labels, dtype=torch.long))
+                        per_token = torch.nn.functional.cross_entropy(
+                            logits.view(-1, logits.size(-1)),
+                            labels.view(-1),
+                            reduction="none",
+                            ignore_index=-100
+                        ).view_as(labels)
+                        # Ensure mask dtype matches per_token for multiplication
+                        mask = mask.to(per_token.dtype)
+                        loss = (per_token * mask).sum()  # Token-sum per sample
+                    else:
+                        # Classification: sum over batch (here batch=1)
+                        loss = torch.nn.functional.cross_entropy(logits, labels, reduction="sum")
+                else:
+                    # Fallback: use model's loss (but log warning if it's likely averaged)
+                    loss = outputs.loss
+                    if i == 0:  # Log once
+                        logger.warning(
+                            "Using model's .loss directly; ensure it's a sum (not mean) over tokens "
+                            "for correct per-sample Fisher scale"
+                        )
 
                 # Check for NaN/Inf
                 if not torch.isfinite(loss):
@@ -356,8 +410,8 @@ class FisherSpectral:
 
         # Get or create consistent subsampling indices
         if block_key not in self.subsample_indices:
-            # Use block-specific seed for reproducibility
-            seed = self.config.seed + hash(block_key) % 1000000
+            # Use stable hash for reproducibility across runs/processes
+            seed = (self.config.seed + _stable_int_hash(block_key)) % (2**31 - 1)
             generator = torch.Generator().manual_seed(seed)
 
             # Create indices on CPU to avoid device issues
@@ -380,9 +434,12 @@ class FisherSpectral:
         if block_structure == 'none':
             return 'global'
         elif block_structure == 'layer':
-            # Extract layer number if present
+            # Extract layer number if present (broader regex for HF models)
             import re
-            layer_match = re.search(r'layer[s]?\.(\d+)', param_name)
+            layer_match = re.search(
+                r'(?:layers?|h|block|encoder\.layer|decoder\.layer|transformer\.h)\.(\d+)',
+                param_name
+            )
             if layer_match:
                 return f"layer_{layer_match.group(1)}"
             elif 'embed' in param_name.lower():
@@ -392,10 +449,13 @@ class FisherSpectral:
             else:
                 return 'other'
         elif block_structure == 'module':
-            # Group by module type
+            # Group by module type (expanded for LLaMA, etc.)
             if any(x in param_name.lower() for x in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'attention']):
                 return 'attention'
-            elif any(x in param_name.lower() for x in ['mlp', 'fc', 'dense', 'feedforward']):
+            elif any(x in param_name.lower() for x in [
+                'mlp', 'fc', 'dense', 'feedforward', 'feed_forward',
+                'gate_proj', 'up_proj', 'down_proj'
+            ]):
                 return 'mlp'
             elif 'embed' in param_name.lower():
                 return 'embedding'
@@ -431,7 +491,10 @@ class FisherSpectral:
                 'seed': self.config.seed,
                 'eps': self.config.eps,
                 'regularization': self.config.regularization,
-                'block_structure': list(gradients.keys())
+                'block_structure': list(gradients.keys()),
+                'sample_unit': 'token',  # Per-token Fisher (losses are token-summed)
+                'normalization': '(1/N) * G^T G',  # N = number of per-sample gradients (tokens)
+                'use_deterministic': self.config.use_deterministic
             }
         }
 
@@ -483,33 +546,54 @@ class FisherSpectral:
         """
         N, P = G.shape
 
+        # Decide eigensolve device (float64 on CPU can be faster for some GPUs)
+        if self.config.eigensolve_device == 'cpu':
+            G = G.cpu()
+        elif self.config.eigensolve_device == 'cuda':
+            if torch.cuda.is_available():
+                G = G.cuda()
+        # else 'auto': leave on current device
+
         # Choose computation path based on dimensions
         if N <= P // 4:
             # Use Gram matrix trick for N << P
             # Eigenvalues of (1/N) G Gᵀ = eigenvalues of (1/N) Gᵀ G (non-zero ones)
             gram = (G @ G.T) / N  # N × N matrix
 
-            # Add small regularization for numerical stability
-            gram = gram + self.config.regularization * torch.eye(N, device=gram.device, dtype=gram.dtype)
-
-            # Compute eigenvalues (already sorted ascending by eigvalsh)
+            # Try without regularization first (for correct spectrum)
             try:
                 eigenvalues = torch.linalg.eigvalsh(gram)
             except torch.linalg.LinAlgError as e:
-                logger.warning(f"Eigendecomposition failed: {e}, using SVD fallback")
-                # Fallback to SVD
+                logger.warning(
+                    f"Eigendecomposition failed: {e}, retrying with jitter={self.config.regularization}"
+                )
+                # Only add regularization on failure
+                jitter = max(self.config.regularization, torch.finfo(gram.dtype).eps * 10)
+                gram_reg = gram + jitter * torch.eye(N, dtype=gram.dtype, device=gram.device)
                 try:
-                    U, S, _ = torch.linalg.svd(gram, full_matrices=False)
-                    eigenvalues = S
+                    eigenvalues = torch.linalg.eigvalsh(gram_reg)
                 except Exception as e2:
-                    logger.error(f"SVD also failed: {e2}, returning zeros")
-                    return torch.zeros(1, dtype=gram.dtype)
+                    logger.warning(f"Regularized eigendecomp also failed: {e2}, using SVD fallback")
+                    # Fallback to SVD
+                    try:
+                        U, S, _ = torch.linalg.svd(gram, full_matrices=False)
+                        eigenvalues = S
+                    except Exception as e3:
+                        logger.error(f"SVD also failed: {e3}, returning zeros")
+                        return torch.zeros(1, dtype=gram.dtype)
         else:
             # For N >= P/4, use randomized SVD for efficiency
+            # Guard against edge cases
             k = min(self.config.top_k_eigenvalues, min(N, P) - 1)
+            if k < 1:
+                logger.warning(f"Cannot compute SVD with k={k} for N={N}, P={P}")
+                return torch.zeros(1, dtype=G.dtype)
+            
             try:
                 # Normalize by sqrt(N) for SVD, then square singular values
-                _, S, _ = torch.svd_lowrank(G / math.sqrt(N), q=k)
+                # Use torch.linalg.svd_lowrank (newer API)
+                from torch.linalg import svd_lowrank
+                _, S, _ = svd_lowrank(G / math.sqrt(N), q=k)
                 eigenvalues = S ** 2
             except Exception as e:
                 logger.warning(f"Randomized SVD failed: {e}, using diagonal approximation")
@@ -519,7 +603,7 @@ class FisherSpectral:
         # Sort descending (critical - eigvalsh returns ascending!)
         eigenvalues = torch.sort(eigenvalues, descending=True).values
 
-        # Filter numerical zeros
+        # Filter numerical zeros (note: κ is computed after this filtering)
         eigenvalues = eigenvalues[eigenvalues > self.config.eps]
 
         return eigenvalues
@@ -551,12 +635,14 @@ class FisherSpectral:
             metrics['spectral_gap'] = 0.0
             metrics['second_eigenvalue'] = 0.0
 
-        # Condition number (with regularization for numerical stability)
+        # Condition number (computed after filtering; uses filtered min eigenvalue)
         min_positive = eigenvalues[eigenvalues > self.config.eps]
         if len(min_positive) > 0:
             metrics['condition_number'] = float(eigenvalues[0] / min_positive[-1])
+            metrics['smallest_eigenvalue'] = float(min_positive[-1])
         else:
             metrics['condition_number'] = float('inf')
+            metrics['smallest_eigenvalue'] = 0.0
 
         # Effective rank via entropy
         # p = eigenvalues / sum, H = -Σ p log(p), rank = exp(H)
@@ -630,7 +716,8 @@ class FisherSpectral:
         model: nn.Module,
         batch: Dict[str, torch.Tensor],
         n_samples: int,
-        block_structure: str
+        block_structure: str,
+        center_gradients: bool
     ) -> Dict[str, Any]:
         """
         Streaming computation using online PCA (memory-efficient).
@@ -639,7 +726,7 @@ class FisherSpectral:
         logger.warning("Streaming mode not yet implemented, using chunked mode instead")
         return self._compute_spectrum_from_gradients(
             self._collect_gradients_chunked(model, batch, n_samples, block_structure),
-            center_gradients=False,
+            center_gradients=center_gradients,
             n_samples=n_samples
         )
 
